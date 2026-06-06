@@ -1,0 +1,98 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Call Status - Attendance Guardian</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh; padding: 20px;
+        }
+        .container {
+            max-width: 700px; margin: 0 auto; background: white;
+            border-radius: 20px; box-shadow: 0 20px 60px rgba(0,0,0,0.3); overflow: hidden;
+        }
+        .header {
+            background: linear-gradient(135deg, #4285F4 0%, #34A853 100%);
+            color: white; padding: 30px; text-align: center;
+        }
+        .header h1 { font-size: 2em; }
+        .content { padding: 30px; }
+        .summary {
+            display: grid; grid-template-columns: repeat(3, 1fr); gap: 15px; margin-bottom: 25px;
+        }
+        .card {
+            text-align: center; padding: 20px; border-radius: 10px;
+        }
+        .total { background: #ebf8ff; color: #2b6cb0; }
+        .success { background: #f0fff4; color: #22543d; }
+        .failed { background: #fff5f5; color: #742a2a; }
+        .card .number { font-size: 2.5em; font-weight: bold; }
+        .call-item {
+            display: flex; align-items: center; padding: 12px 15px;
+            border-bottom: 1px solid #e2e8f0;
+        }
+        .call-item .icon { font-size: 1.5em; margin-right: 12px; }
+        .call-name { font-weight: bold; }
+        .call-detail { font-size: 0.85em; color: #718096; }
+        .btn {
+            display: inline-block; padding: 12px 30px; background: #4285F4;
+            color: white; border-radius: 25px; text-decoration: none; font-weight: 600;
+        }
+        .btn:hover { transform: scale(1.05); }
+        .text-center { text-align: center; margin-top: 25px; }
+        .badge {
+            display: inline-block; padding: 3px 10px; border-radius: 15px;
+            font-size: 0.8em; color: white; margin-left: 5px;
+        }
+        .badge-ai { background: #4285F4; }
+        .badge-voice { background: #48bb78; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <h1>🤖 AI Call Results</h1>
+        </div>
+        <div class="content">
+            <div class="summary">
+                <div class="card total">
+                    <div class="number">{{ results.total }}</div>
+                    <div>Total Calls</div>
+                </div>
+                <div class="card success">
+                    <div class="number">{{ results.successful }}</div>
+                    <div>✅ Success</div>
+                </div>
+                <div class="card failed">
+                    <div class="number">{{ results.failed }}</div>
+                    <div>❌ Failed</div>
+                </div>
+            </div>
+
+            <h3 style="margin-bottom: 15px;">Call Details:</h3>
+            {% for call in results.details %}
+            <div class="call-item">
+                <div class="icon">{{ '✅' if call.success else '❌' }}</div>
+                <div>
+                    <div class="call-name">
+                        {{ call.student }} → {{ call.parent }}
+                        <span class="badge badge-ai">AI 2-Way</span>
+                    </div>
+                    <div class="call-detail">
+                        Channel: {{ call.get('channel', 'voice') }} | SID: {{ call.get('sid', 'N/A') }}
+                    </div>
+                </div>
+            </div>
+            {% endfor %}
+
+            <div class="text-center">
+                <a href="/" class="btn">⬅ Back to Dashboard</a>
+            </div>
+        </div>
+    </div>
+</body>
+</html>

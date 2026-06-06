@@ -1,0 +1,267 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Analysis Results - Attendance Guardian</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh;
+            padding: 20px;
+        }
+
+        .container {
+            max-width: 900px;
+            margin: 0 auto;
+            background: white;
+            border-radius: 20px;
+            box-shadow: 0 20px 60px rgba(0,0,0,0.3);
+            overflow: hidden;
+        }
+
+        .header {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            padding: 30px;
+            text-align: center;
+        }
+
+        .header h1 { font-size: 2em; margin-bottom: 10px; }
+        
+        .badge {
+            display: inline-block;
+            padding: 8px 25px;
+            border-radius: 20px;
+            font-weight: bold;
+            font-size: 1.1em;
+            margin-top: 10px;
+        }
+        .badge-HIGH { background: #f56565; }
+        .badge-MEDIUM { background: #ed8936; }
+        .badge-LOW { background: #48bb78; }
+
+        .content { padding: 30px; }
+
+        .selection-bar {
+            background: #f8f9fa;
+            padding: 15px 20px;
+            border-radius: 10px;
+            margin-bottom: 20px;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+
+        .student-card {
+            background: #f8f9fa;
+            border-radius: 12px;
+            padding: 20px;
+            margin-bottom: 15px;
+            border-left: 5px solid #667eea;
+            position: relative;
+        }
+
+        .student-card.high { border-left-color: #f56565; }
+        .student-card.medium { border-left-color: #ed8936; }
+
+        .student-card.selected {
+            background: #ebf8ff;
+            border: 2px solid #667eea;
+        }
+
+        .student-checkbox {
+            position: absolute;
+            top: 20px;
+            right: 20px;
+            width: 20px;
+            height: 20px;
+            cursor: pointer;
+        }
+
+        .student-name {
+            font-size: 1.2em;
+            font-weight: bold;
+            color: #2d3748;
+        }
+
+        .risk-badge {
+            display: inline-block;
+            padding: 4px 12px;
+            border-radius: 15px;
+            color: white;
+            font-size: 0.85em;
+            font-weight: bold;
+            margin-left: 10px;
+        }
+        .risk-HIGH { background: #f56565; }
+        .risk-MEDIUM { background: #ed8936; }
+
+        .student-info {
+            display: grid;
+            grid-template-columns: repeat(3, 1fr);
+            gap: 10px;
+            margin: 10px 0;
+            font-size: 0.9em;
+        }
+
+        .info-item {
+            background: white;
+            padding: 8px 12px;
+            border-radius: 6px;
+        }
+
+        .info-label { color: #718096; font-size: 0.8em; }
+        .info-value { color: #2d3748; font-weight: 600; }
+
+        .details { margin-top: 10px; color: #4a5568; }
+        .action { color: #c53030; font-weight: 600; margin-top: 5px; }
+
+        .actions-bar {
+            position: sticky;
+            bottom: 20px;
+            background: white;
+            padding: 20px;
+            border-radius: 15px;
+            box-shadow: 0 -5px 20px rgba(0,0,0,0.1);
+            text-align: center;
+            margin-top: 20px;
+        }
+
+        .btn {
+            display: inline-block;
+            padding: 12px 30px;
+            background: #667eea;
+            color: white;
+            border: none;
+            border-radius: 25px;
+            cursor: pointer;
+            font-size: 1em;
+            text-decoration: none;
+            font-weight: 600;
+            margin: 5px;
+        }
+        .btn:hover { transform: scale(1.05); }
+        .btn:disabled { opacity: 0.5; cursor: not-allowed; }
+        .btn-call { background: #48bb78; font-size: 1.1em; padding: 15px 40px; }
+        .btn-back { background: #718096; }
+
+        .no-results {
+            text-align: center;
+            padding: 60px;
+            font-size: 1.2em;
+            color: #718096;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <h1>{{ dimension_title }}</h1>
+            <div class="badge badge-{{ highest_risk }}">
+                {{ at_risk|length }} Student(s) at Risk
+            </div>
+        </div>
+
+        <div class="content">
+            {% if at_risk %}
+                <div class="selection-bar">
+                    <label>
+                        <input type="checkbox" id="selectAll" onclick="toggleAll()">
+                        <strong>Select All</strong>
+                    </label>
+                    <span>Selected: <strong id="count">0</strong></span>
+                </div>
+
+                <form id="callForm" action="/call/selective" method="POST">
+                    <input type="hidden" name="dimension" value="{{ dimension }}">
+                    
+                    {% for student in at_risk %}
+                    <div class="student-card {{ student.risk_level|lower }}" id="card-{{ loop.index0 }}">
+                        <input type="checkbox" 
+                               name="selected_students" 
+                               value="{{ loop.index0 }}" 
+                               class="student-checkbox"
+                               onchange="updateCard(this, {{ loop.index0 }})">
+                        
+                        <div class="student-name">
+                            {{ student.student_name }}
+                            <span class="risk-badge risk-{{ student.risk_level }}">{{ student.risk_level }}</span>
+                        </div>
+                        
+                        <small style="color: #718096;">Reg: {{ student.registration }}</small>
+
+                        <div class="student-info">
+                            <div class="info-item">
+                                <div class="info-label">Parent</div>
+                                <div class="info-value">{{ student.parent_name }}</div>
+                            </div>
+                            <div class="info-item">
+                                <div class="info-label">Phone</div>
+                                <div class="info-value">{{ student.parent_phone }}</div>
+                            </div>
+                            <div class="info-item">
+                                <div class="info-label">Score</div>
+                                <div class="info-value">{{ student.risk_score }}</div>
+                            </div>
+                        </div>
+
+                        <div class="details">{{ student.details }}</div>
+                        <div class="action">⚠️ {{ student.recommended_action }}</div>
+                    </div>
+                    {% endfor %}
+
+                    <div class="actions-bar">
+                        <button type="submit" class="btn btn-call" id="callBtn" disabled>
+                            📞 Call <span id="callCount">0</span> Parent(s)
+                        </button>
+                        <a href="/" class="btn btn-back">⬅ Back</a>
+                    </div>
+                </form>
+            {% else %}
+                <div class="no-results">
+                    <div style="font-size: 4em;">✅</div>
+                    <h2>No Students at Risk!</h2>
+                    <p>All students are doing well.</p>
+                    <br>
+                    <a href="/" class="btn">⬅ Back to Dashboard</a>
+                </div>
+            {% endif %}
+        </div>
+    </div>
+
+    <script>
+        function updateCard(checkbox, index) {
+            const card = document.getElementById('card-' + index);
+            if (checkbox.checked) {
+                card.classList.add('selected');
+            } else {
+                card.classList.remove('selected');
+            }
+            updateCount();
+        }
+
+        function toggleAll() {
+            const selectAll = document.getElementById('selectAll');
+            const checkboxes = document.querySelectorAll('.student-checkbox');
+            
+            checkboxes.forEach((cb, i) => {
+                cb.checked = selectAll.checked;
+                updateCard(cb, i);
+            });
+        }
+
+        function updateCount() {
+            const checked = document.querySelectorAll('.student-checkbox:checked');
+            const count = checked.length;
+            
+            document.getElementById('count').textContent = count;
+            document.getElementById('callCount').textContent = count;
+            document.getElementById('callBtn').disabled = (count === 0);
+        }
+    </script>
+</body>
+</html>

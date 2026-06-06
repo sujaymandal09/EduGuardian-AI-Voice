@@ -1,0 +1,209 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Upload CSV - Attendance Guardian</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh;
+            padding: 20px;
+        }
+
+        .container {
+            max-width: 650px;
+            margin: 50px auto;
+            background: white;
+            border-radius: 20px;
+            box-shadow: 0 20px 60px rgba(0,0,0,0.3);
+            overflow: hidden;
+        }
+
+        .header {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            padding: 30px;
+            text-align: center;
+        }
+
+        .header h1 { font-size: 2em; margin-bottom: 5px; }
+        .header p { opacity: 0.9; }
+
+        .content { padding: 30px; }
+
+        .alert {
+            padding: 12px 20px;
+            border-radius: 10px;
+            margin-bottom: 20px;
+        }
+        .alert-success { background: #c6f6d5; color: #22543d; }
+        .alert-error { background: #fed7d7; color: #742a2a; }
+
+        .upload-box {
+            border: 3px dashed #cbd5e0;
+            border-radius: 15px;
+            padding: 40px;
+            text-align: center;
+            background: #f8f9fa;
+            margin-bottom: 20px;
+            transition: all 0.3s;
+        }
+
+        .upload-box:hover {
+            border-color: #667eea;
+            background: #ebf4ff;
+        }
+
+        .upload-box .icon { font-size: 4em; margin-bottom: 15px; }
+
+        input[type="file"] { display: none; }
+
+        .btn-choose {
+            display: inline-block;
+            padding: 12px 30px;
+            background: #667eea;
+            color: white;
+            border-radius: 25px;
+            cursor: pointer;
+            font-weight: 600;
+            transition: transform 0.3s;
+        }
+        .btn-choose:hover { transform: scale(1.05); }
+
+        .file-name {
+            margin-top: 15px;
+            color: #667eea;
+            font-weight: 600;
+            display: none;
+        }
+        .file-name.show { display: block; }
+
+        .btn-upload {
+            width: 100%;
+            padding: 14px;
+            background: #48bb78;
+            color: white;
+            border: none;
+            border-radius: 10px;
+            font-size: 1.1em;
+            font-weight: 600;
+            cursor: pointer;
+            transition: transform 0.3s;
+        }
+        .btn-upload:hover { transform: scale(1.02); }
+        .btn-upload:disabled {
+            opacity: 0.5;
+            cursor: not-allowed;
+        }
+
+        .format-box {
+            background: #f8f9fa;
+            border-radius: 10px;
+            padding: 20px;
+            margin-top: 20px;
+        }
+
+        .format-box h4 { margin-bottom: 10px; }
+
+        .format-box code {
+            display: block;
+            background: #2d3748;
+            color: #68d391;
+            padding: 15px;
+            border-radius: 8px;
+            font-size: 0.8em;
+            overflow-x: auto;
+            white-space: nowrap;
+            margin: 10px 0;
+        }
+
+        .back-link {
+            text-align: center;
+            margin-top: 20px;
+        }
+        .back-link a {
+            color: #667eea;
+            text-decoration: none;
+            font-weight: 600;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <h1>📂 Upload Student Data</h1>
+            <p>Replace existing data with new CSV</p>
+        </div>
+
+        <div class="content">
+            <!-- Messages -->
+            {% with messages = get_flashed_messages(with_categories=true) %}
+                {% if messages %}
+                    {% for category, message in messages %}
+                        <div class="alert alert-{{ category }}">{{ message }}</div>
+                    {% endfor %}
+                {% endif %}
+            {% endwith %}
+
+            <!-- Upload Form -->
+            <form action="/upload" method="POST" enctype="multipart/form-data" id="uploadForm">
+                <div class="upload-box">
+                    <div class="icon">📄</div>
+                    <h3>Select CSV File</h3>
+                    <p style="color: #718096; margin: 10px 0;">Click button below to browse</p>
+                    
+                    <input type="file" name="file" id="fileInput" accept=".csv" required>
+                    <label for="fileInput" class="btn-choose">📁 Choose File</label>
+                    
+                    <div class="file-name" id="fileName"></div>
+                </div>
+
+                <button type="submit" class="btn-upload" id="uploadBtn" disabled>
+                    📤 Upload CSV File
+                </button>
+            </form>
+
+            <!-- Format Info -->
+            <div class="format-box">
+                <h4>📋 Required CSV Columns:</h4>
+                <code>registration,name,parent_name,parent_phone,attendance_pct,attendance_total,attendance_attended,consecutive_absences,performance_grade,performance_remarks,behavior_incidents,behavior_status,language</code>
+                
+                <h4 style="margin-top: 15px;">💡 Sample Row:</h4>
+                <code>REG-001,Aarav Patel,Rajesh Patel,+919999000001,65,50,33,5,C,Poor in Math,3,Warning,en</code>
+            </div>
+
+            <div class="back-link">
+                <a href="/">⬅ Back to Dashboard</a>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        const fileInput = document.getElementById('fileInput');
+        const fileName = document.getElementById('fileName');
+        const uploadBtn = document.getElementById('uploadBtn');
+
+        fileInput.addEventListener('change', function() {
+            if (this.files.length > 0) {
+                const file = this.files[0];
+                
+                if (!file.name.toLowerCase().endsWith('.csv')) {
+                    alert('Please select a CSV file!');
+                    this.value = '';
+                    fileName.classList.remove('show');
+                    uploadBtn.disabled = true;
+                    return;
+                }
+                
+                fileName.textContent = '✅ Selected: ' + file.name;
+                fileName.classList.add('show');
+                uploadBtn.disabled = false;
+            }
+        });
+    </script>
+</body>
+</html>

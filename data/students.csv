@@ -1,0 +1,31 @@
+registration,name,parent_name,parent_phone,attendance_pct,attendance_total,attendance_attended,consecutive_absences,performance_grade,performance_remarks,behavior_incidents,behavior_status,language
+REG-001,Aarav Patel,Rajesh Patel,+918515063685,65,50,33,5,C,Poor performance in Math,3,Warning,en
+REG-002,Diya Sharma,Priya Sharma,+918515063602,92,50,46,0,A,Excellent student,0,Excellent,en
+REG-003,Arjun Singh,Vikram Singh,+918515063603,78,50,39,2,B,Good but inconsistent,1,Good,hi
+REG-004,Ananya Gupta,Sunita Gupta,+918515063604,55,50,28,7,D,Very poor performance,5,Critical,en
+REG-005,Vihaan Kumar,Deepak Kumar,+918515063605,88,50,44,1,B+,Above average,0,Good,hi
+REG-006,Saanvi Joshi,Neha Joshi,+918515063606,72,50,36,3,C,Failing in Science,2,Warning,en
+REG-007,Reyansh Malhotra,Ravi Malhotra,+918515063607,45,50,23,8,F,At risk of failing,6,Critical,en
+REG-008,Anika Verma,Pooja Verma,+918515063608,95,50,48,0,A,Top performer,0,Excellent,en
+REG-009,Kabir Kapoor,Amit Kapoor,+918515063609,70,50,35,4,C-,Struggling in English,1,Warning,hi
+REG-010,Aditi Roy,Sanjay Roy,+918515063610,84,50,42,1,B+,Good overall performance,0,Good,en
+REG-011,Rohan Das,Sumit Das,+918515063611,60,50,30,5,C,Needs improvement in studies,2,Warning,hi
+REG-012,Meera Sen,Arup Sen,+918515063612,91,50,46,0,A,Excellent academic record,0,Excellent,en
+REG-013,Ishaan Bose,Pradip Bose,+918515063613,67,50,34,3,C+,Average performance,1,Good,en
+REG-014,Tara Nair,Rakesh Nair,+918515063614,52,50,26,7,D,Weak in multiple subjects,4,Critical,en
+REG-015,Yash Jain,Mukesh Jain,+918515063615,80,50,40,2,B,Performs well with guidance,0,Good,hi
+REG-016,Riya Chatterjee,Sourav Chatterjee,+918515063616,93,50,47,0,A,Outstanding student,0,Excellent,en
+REG-017,Dev Mishra,Alok Mishra,+918515063617,58,50,29,6,D+,Needs regular mentoring,3,Warning,hi
+REG-018,Nisha Ghosh,Partha Ghosh,+918515063618,87,50,44,1,B+,Consistently above average,0,Good,en
+REG-019,Aditya Dey,Biplab Dey,+918515063619,49,50,25,8,F,Poor attendance and grades,6,Critical,en
+REG-020,Pooja Sarkar,Biswajit Sarkar,+918515063620,76,50,38,2,B,Shows potential,1,Good,hi
+REG-021,Kunal Mondal,Goutam Mondal,+918515063621,89,50,45,0,A-,Very good performance,0,Excellent,en
+REG-022,Sana Ali,Farhan Ali,+918515063622,63,50,32,4,C,Needs improvement in Math,2,Warning,en
+REG-023,Harsh Mehta,Nitin Mehta,+918515063623,94,50,47,0,A,Excellent attendance and grades,0,Excellent,hi
+REG-024,Mitali Banerjee,Sujit Banerjee,+918515063624,54,50,27,7,D,Struggling academically,4,Critical,en
+REG-025,Soham Chakraborty,Debasish Chakraborty,+918515063625,82,50,41,1,B+,Good understanding of concepts,0,Good,en
+REG-026,Ira Mukherjee,Arindam Mukherjee,+918515063626,97,50,49,0,A,Exceptional student,0,Excellent,en
+REG-027,Om Prakash,Mahesh Prakash,+918515063627,47,50,24,8,F,High risk of failing exams,7,Critical,hi
+REG-028,Zoya Sheikh,Nadeem Sheikh,+918515063628,74,50,37,3,C+,Needs more classroom participation,1,Warning,en
+REG-029,Lavanya Iyer,Suresh Iyer,+918515063629,90,50,45,0,A,Consistently strong performer,0,Excellent,en
+REG-030,Neel Banerjee,Tapas Banerjee,+918515063630,68,50,34,4,C,Average but improving,2,Warning,hi
