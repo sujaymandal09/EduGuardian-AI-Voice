@@ -47,5 +47,14 @@ class CallPayload:
     dimension: str
     risk_level: str
     details: str
-    recommended_action: str = ""  # ← ADD THIS LINE
+    recommended_action: str = ""
     language: str = "en"
+    # Student academic data (populated from CSV for AI context)
+    attendance_pct: Optional[float] = None
+    attendance_total: Optional[int] = None
+    attendance_attended: Optional[int] = None
+    consecutive_absences: Optional[int] = None
+    performance_grade: Optional[str] = None
+    performance_remarks: Optional[str] = None
+    behavior_incidents: Optional[int] = None
+    behavior_status: Optional[str] = None

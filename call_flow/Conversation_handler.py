@@ -5,6 +5,7 @@ PERSON 2: CONVERSATION MODULE - ENGLISH VERSION
 """
 import logging
 import random
+import time
 
 logger = logging.getLogger(__name__)
 
@@ -20,50 +21,89 @@ class ConversationHandler:
         """Process parent speech and generate AI response in English."""
         if not chat:
             return self._get_fallback_message()
-        
-        try:
-            context = ""
-            if student_data:
-                context = self._build_context(student_data)
-            
-            prompt = f"{context}\nParent said: \"{parent_speech}\"\nRespond naturally in English. Keep it short (2-3 sentences)."
-            
-            response = chat.send_message(prompt)
-            ai_reply = response.text.strip()
-            
-            logger.info(f"Parent: {parent_speech[:50]}... → AI: {ai_reply[:50]}...")
-            return ai_reply
-            
-        except Exception as e:
-            logger.error(f"Conversation error: {e}")
-            return self._get_error_message()
+
+        context = self._build_context(student_data) if student_data else ""
+        user_message = (
+            f"{context}\n"
+            f"Parent said: \"{parent_speech}\"\n"
+            f"Respond naturally in English. Keep it short (2-3 sentences)."
+        )
+
+        # Append user turn to history
+        chat["messages"].append({"role": "user", "content": user_message})
+
+        for attempt in range(3):
+            try:
+                response = chat["client"].chat.completions.create(
+                    model="llama-3.3-70b-versatile",
+                    messages=chat["messages"]
+                )
+                ai_reply = response.choices[0].message.content.strip()
+                # Append assistant reply so future turns have context
+                chat["messages"].append({"role": "assistant", "content": ai_reply})
+                logger.info(f"Parent: {parent_speech[:50]}... -> AI: {ai_reply[:50]}...")
+                return ai_reply
+            except Exception as e:
+                if attempt < 2:
+                    logger.warning(f"Groq attempt {attempt + 1} failed ({e}), retrying...")
+                    time.sleep(1)
+                else:
+                    logger.error(f"Conversation error after 3 attempts: {e}")
+                    # Remove the unanswered user message so history stays clean
+                    chat["messages"].pop()
+                    return self._get_error_message()
     
     def _build_context(self, student_data: dict) -> str:
-        """Build English context for AI."""
-        context = "STUDENT INFORMATION:\n"
-        context += f"- Name: {student_data.get('name', 'N/A')}\n"
-        if student_data.get('attendance_pct'):
-            context += f"- Attendance: {student_data['attendance_pct']}%\n"
+        """Build a concise student context block for the AI prompt."""
+        lines = ["STUDENT INFORMATION:"]
+        lines.append(f"- Name: {student_data.get('name', 'N/A')}")
+        if student_data.get('details'):
+            lines.append(f"- Summary: {student_data['details']}")
+        if student_data.get('attendance_pct') is not None:
+            lines.append(f"- Attendance: {student_data['attendance_pct']}%")
         if student_data.get('attendance_attended') and student_data.get('attendance_total'):
-            context += f"- Classes: {student_data['attendance_attended']}/{student_data['attendance_total']}\n"
+            lines.append(f"- Classes attended: {student_data['attendance_attended']}/{student_data['attendance_total']}")
         if student_data.get('consecutive_absences'):
-            context += f"- Consecutive absences: {student_data['consecutive_absences']} days\n"
+            lines.append(f"- Consecutive absences: {student_data['consecutive_absences']} days")
         if student_data.get('performance_grade'):
-            context += f"- Grade: {student_data['performance_grade']}\n"
+            lines.append(f"- Grade: {student_data['performance_grade']}")
+        if student_data.get('performance_remarks'):
+            lines.append(f"- Remarks: {student_data['performance_remarks']}")
         if student_data.get('behavior_incidents'):
-            context += f"- Behavior incidents: {student_data['behavior_incidents']}\n"
-        return context
-    
+            lines.append(f"- Behaviour incidents: {student_data['behavior_incidents']}")
+        if student_data.get('behavior_status'):
+            lines.append(f"- Behaviour status: {student_data['behavior_status']}")
+        return "\n".join(lines)
+
     def should_end_conversation(self, parent_speech: str) -> bool:
-        """Check if parent wants to end the conversation."""
-        ending_phrases = [
-            "that's all", "nothing else", "thank you", "thanks",
-            "i'm done", "that's it", "no more", "bye", "goodbye",
-            "okay", "alright", "got it", "understood", "that helps",
-            "no thank you", "i'm good", "that's enough"
+        """
+        Return True only when the parent clearly signals they are done.
+
+        Deliberately avoids short words like 'okay', 'thanks', 'got it'
+        because parents use those mid-conversation all the time.
+        """
+        explicit_endings = [
+            "that's all",
+            "that is all",
+            "nothing else",
+            "no more questions",
+            "no other questions",
+            "i'm done",
+            "i am done",
+            "no, goodbye",
+            "no, bye",
+            "goodbye",
+            "bye bye",
+            "that's it, bye",
+            "no thank you, goodbye",
+            "no thank you, bye",
+            "i have no more questions",
         ]
-        speech_lower = parent_speech.lower()
-        return any(phrase in speech_lower for phrase in ending_phrases)
+        speech_lower = parent_speech.lower().strip()
+        # Exact short phrases only (avoid partial matches on "bye" inside longer words)
+        if speech_lower in ("bye", "goodbye"):
+            return True
+        return any(phrase in speech_lower for phrase in explicit_endings)
     
     def get_followup_question(self) -> str:
         """Generate English follow-up question."""

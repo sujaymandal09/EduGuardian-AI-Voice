@@ -27,8 +27,8 @@ def get_voice_service():
     global voice_service
     
     if voice_service is None:
-        # 1. Twilio + Gemini (2-Way AI - BEST)
-        if os.getenv("TWILIO_ACCOUNT_SID") and os.getenv("GEMINI_API_KEY"):
+        # 1. Twilio + Groq (2-Way AI - BEST)
+        if os.getenv("TWILIO_ACCOUNT_SID") and os.getenv("GROQ_API_KEY"):
             from services.twilio_gemini_voice import TwoWayAIVoiceService
             voice_service = TwoWayAIVoiceService()
             print("🤖 2-Way AI Voice (Twilio + Gemini)")
@@ -152,18 +152,32 @@ def call_selective():
         return redirect(url_for('index'))
     
     selected_students = [at_risk[int(i)] for i in selected if int(i) < len(at_risk)]
-    
-    payloads = [CallPayload(
-        to_number=s.parent_phone,
-        registration=s.registration,
-        student_name=s.student_name,
-        parent_name=s.parent_name,
-        dimension=s.dimension,
-        risk_level=s.risk_level,
-        details=s.details,
-        recommended_action=s.recommended_action,
-        language="en"
-    ) for s in selected_students]
+
+    # Build a lookup so the AI gets real CSV data during the call
+    all_students = {st.registration: st for st in load_students()}
+
+    payloads = []
+    for s in selected_students:
+        st = all_students.get(s.registration)
+        payloads.append(CallPayload(
+            to_number=s.parent_phone,
+            registration=s.registration,
+            student_name=s.student_name,
+            parent_name=s.parent_name,
+            dimension=s.dimension,
+            risk_level=s.risk_level,
+            details=s.details,
+            recommended_action=s.recommended_action,
+            language="en",
+            attendance_pct=st.attendance_pct if st else None,
+            attendance_total=st.attendance_total if st else None,
+            attendance_attended=st.attendance_attended if st else None,
+            consecutive_absences=st.consecutive_absences if st else None,
+            performance_grade=st.performance_grade if st else None,
+            performance_remarks=st.performance_remarks if st else None,
+            behavior_incidents=st.behavior_incidents if st else None,
+            behavior_status=st.behavior_status if st else None,
+        ))
     
     voice = get_voice_service()
     results = voice.make_batch_calls(payloads)
