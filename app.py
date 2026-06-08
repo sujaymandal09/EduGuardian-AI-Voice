@@ -1,8 +1,15 @@
 """
 app.py - Attendance Guardian with 2-Way AI Voice
 """
+import sys
 import csv
 import os
+
+# Windows cp1252 can't print emoji — force UTF-8 for the whole process
+if hasattr(sys.stdout, 'reconfigure'):
+    sys.stdout.reconfigure(encoding='utf-8')
+if hasattr(sys.stderr, 'reconfigure'):
+    sys.stderr.reconfigure(encoding='utf-8')
 from flask import Flask, render_template, request, redirect, url_for, flash
 from dotenv import load_dotenv
 from core.models import StudentRecord, CallPayload
@@ -187,40 +194,46 @@ def call_selective():
 @app.route('/handle-parent-response', methods=['GET', 'POST'])
 def handle_parent_response():
     """Twilio webhook - receives parent's speech."""
-    
-    parent_speech = request.form.get('SpeechResult', '')
-    
+
+    call_sid = request.form.get('CallSid', '')
+    parent_speech = request.form.get('SpeechResult', '').strip()
+    ngrok_url = os.getenv("NGROK_URL", "")
+    phone = os.getenv("SCHOOL_PHONE", "033-4805-1910")
+
     if not parent_speech:
         print("⚠️  No speech detected from parent")
-        return """<?xml version="1.0" encoding="UTF-8"?>
+        retry_url = f"{ngrok_url}/handle-parent-response"
+        return f"""<?xml version="1.0" encoding="UTF-8"?>
 <Response>
-    <Say voice="alice" language="en-IN">
-        I didn't catch that. Please try again.
-    </Say>
-    <Gather input="speech" language="en-IN" action="/handle-parent-response" method="POST" timeout="4">
-        <Say voice="alice" language="en-IN">Please tell me your question.</Say>
+    <Gather input="speech" language="en-IN" action="{retry_url}" method="POST" timeout="5" speechTimeout="auto" bargeIn="true">
+        <Say voice="alice" language="en-IN">I didn't catch that. Please go ahead and speak.</Say>
     </Gather>
-    <Say voice="alice" language="en-IN">Please contact the college. Goodbye.</Say>
+    <Say voice="alice" language="en-IN">Please contact the college at {phone}. Goodbye.</Say>
 </Response>""", 200, {'Content-Type': 'text/xml'}
-    
+
     print(f"\n📞 PARENT SAID: \"{parent_speech}\"")
-    
+
     voice = get_voice_service()
-    
-    # Find active conversation
+
+    # Resolve registration using CallSid sent by Twilio in every webhook POST
     registration = None
-    if hasattr(voice, '_conversations') and voice._conversations:
-        registration = list(voice._conversations.keys())[0]
-    
+    if call_sid and hasattr(voice, 'get_registration_for_call'):
+        registration = voice.get_registration_for_call(call_sid)
+
+    # Fallback: pick the only active conversation (single-call scenario)
+    if not registration and hasattr(voice, '_conversations') and voice._conversations:
+        registration = next(iter(voice._conversations))
+        print(f"⚠️  CallSid lookup missed — falling back to first conversation ({registration})")
+
     if registration and hasattr(voice, 'generate_followup_twiml'):
         twiml = voice.generate_followup_twiml(registration, parent_speech)
         return twiml, 200, {'Content-Type': 'text/xml'}
-    
-    # Fallback
-    phone = os.getenv("SCHOOL_PHONE", "033-4805-1910")
+
+    # Fallback when conversation state is gone (e.g. app restarted mid-call)
+    print(f"⚠️  No active conversation found for CallSid={call_sid}")
     return f"""<?xml version="1.0" encoding="UTF-8"?>
 <Response>
-    <Say voice="alice" language="en-IN">Thank you. Contact college at {phone}. Goodbye.</Say>
+    <Say voice="alice" language="en-IN">Thank you for your response. Please contact the college at {phone} for further assistance. Goodbye.</Say>
 </Response>""", 200, {'Content-Type': 'text/xml'}
 
 @app.route('/upload', methods=['GET', 'POST'])

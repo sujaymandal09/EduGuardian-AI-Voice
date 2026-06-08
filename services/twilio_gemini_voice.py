@@ -52,6 +52,7 @@ class TwoWayAIVoiceService:
 
         self._conversations = {}
         self._student_data = {}
+        self._call_sid_map = {}  # CallSid -> registration
         self.calls_made = []
 
     def _get_chat(self, student_data: dict) -> dict:
@@ -127,7 +128,7 @@ KEY PHRASES:
             method="POST"
             timeout="5"
             speechTimeout="auto"
-            bargein="true">
+            bargeIn="true">
         <Say voice="alice" language="en-IN">{message}</Say>
     </Gather>
     <Say voice="alice" language="en-IN">{self.closing.get_silent_ending_message()}</Say>
@@ -144,6 +145,7 @@ KEY PHRASES:
                 twiml=twiml
             )
 
+            self._call_sid_map[call.sid] = payload.registration
             self.calls_made.append(payload)
             print(f"   SID: {call.sid}")
             print(f"   Parent can interrupt anytime!\n")
@@ -152,6 +154,10 @@ KEY PHRASES:
         except Exception as e:
             print(f"   {str(e)[:100]}")
             return NotificationResult(success=False, error_message=str(e))
+
+    def get_registration_for_call(self, call_sid: str) -> str | None:
+        """Resolve Twilio CallSid to a student registration number."""
+        return self._call_sid_map.get(call_sid)
 
     def handle_response(self, registration: str, parent_speech: str) -> str:
         """Handle parent speech using conversation + closing modules."""
@@ -195,7 +201,7 @@ KEY PHRASES:
             method="POST"
             timeout="3"
             speechTimeout="auto"
-            bargein="true">
+            bargeIn="true">
         <Say voice="alice" language="en-IN">{safe}</Say>
     </Gather>
     <Say voice="alice" language="en-IN">{self.closing.get_silent_ending_message()}</Say>
