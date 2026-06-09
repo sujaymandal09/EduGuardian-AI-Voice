@@ -317,7 +317,8 @@ class ConversationState:
 #  MAIN SERVICE
 # ─────────────────────────────────────────────────────────────────
 class TwoWayAIVoiceService:
-    MODEL = "llama-3.3-70b-versatile"
+    MODEL = "llama-3.1-8b-instant"
+    MAX_HISTORY = 12
 
     def __init__(self):
         self._twilio_sid   = os.getenv("TWILIO_ACCOUNT_SID")
