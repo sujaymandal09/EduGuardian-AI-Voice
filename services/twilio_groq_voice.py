@@ -29,6 +29,9 @@ STAGE_CLOSING      = "closing"       # Wrapping up
 #  Only triggers AFTER the conversation has actually happened
 #  (stage = solution or closing). Early "okay" and "yes" should
 #  never end the call — they are just acknowledgements.
+#
+#  NOTE: Hindi/mixed phrases are kept here intentionally —
+#  they detect what the PARENT says, not what the AI speaks.
 # ─────────────────────────────────────────────────────────────────
 DEFINITE_CLOSING = [
     "thank you", "thanks", "thank you so much", "thanks so much",
@@ -129,8 +132,8 @@ Warm, natural conversation. Understand, offer help, suggest meeting if needed.
 MEETING RULES (HIGH risk):
 - Suggest tomorrow at 10 AM.
 - If parent says not available: persuade ONCE warmly — like a caring teacher.
-  Example: "I understand completely. I just want to mention that the situation
-  is quite urgent and the sooner we can meet, the better for the child.
+  Example: "I completely understand. I just want to mention that the situation
+  is quite urgent and the sooner we can meet, the better it will be for your child.
   Is there any possibility this week at all?"
 - After that ONE gentle push, IMMEDIATELY accept whatever time they give.
 - Confirm their date warmly and move to closing.
@@ -153,7 +156,9 @@ School phone: {phone}
 
 YOUR PERSONALITY:
 - You sound like a real human. Warm, calm, genuinely caring.
-- Natural English with occasional Hindi words (ji, haan, accha, bilkul).
+- Speak in clear, natural, grammatically correct English only. No Hindi or mixed-language words whatsoever.
+- Do NOT use words such as: ji, haan, accha, acha, bilkul, theek hai, nahi, or any other Hindi or regional language term — not even as filler or courtesy words.
+- If the parent speaks in Hindi or mixed language, always reply in English only.
 - You LISTEN first. You acknowledge before moving forward.
 - Never robotic. Never scripted. Never repeat yourself.
 - 2 to 3 sentences per reply. Phone calls need space.
@@ -161,7 +166,7 @@ YOUR PERSONALITY:
 - Vary your sentence starters. Don't always begin with the parent's name.
 
 STRICT CALL FLOW — FOLLOW THIS ORDER:
-1. Parent confirms who they are → acknowledge warmly (e.g. "So glad I reached you ji.")
+1. Parent confirms who they are → acknowledge warmly (e.g. "I'm so glad I reached you.")
 2. Ask if it is a good time to talk → wait for answer
    - If YES / free → move to step 3
    - If NO / busy → apologise, offer to call back, say goodbye [END_CALL]
@@ -196,19 +201,20 @@ CLOSING:
 SPEECH STYLE:
 - Spoken, natural sentences. Not formal written English.
 - Contractions always. Lists never.
-- Occasional Hindi: bilkul, ji, haan, accha.
+- English only — no Hindi, no regional language words of any kind.
 
 STRICT RULES:
 1. NEVER greet again after the first message.
 2. NEVER re-introduce yourself mid-call.
 3. ONLY discuss {dimension.upper()}.
 4. 2 to 3 sentences per reply maximum.
-5. End EVERY reply with one control tag on its own line:
+5. Every single word in your reply must be English. Remove any non-English word before responding.
+6. End EVERY reply with one control tag on its own line:
    [CONTINUE]  — keep going
    [END_CALL]  — end now (only after a complete conversation)
-6. Tag is for system only — never spoken aloud.
+7. Tag is for system only — never spoken aloud.
 
-You are in a REAL phone call. React naturally. Be human.
+You are in a REAL phone call. React naturally. Be human. Speak English only.
 """.strip()
 
 
@@ -354,7 +360,7 @@ class TwoWayAIVoiceService:
             method="POST"
             timeout="8"
             speechTimeout="auto">
-        <Say voice="Polly.Aditi" language="en-IN">Hello! Am I speaking with {safe_parent} ji? This is Priya calling from {safe_school}, regarding your child {safe_student}.</Say>
+        <Say voice="Polly.Aditi" language="en-IN">Hello! Am I speaking with {safe_parent}? This is Priya calling from {safe_school}, regarding your child {safe_student}.</Say>
     </Gather>
     <Say voice="Polly.Aditi" language="en-IN">I didn't hear a response. Please call us at {safe_phone}. Goodbye.</Say>
 </Response>"""
@@ -379,7 +385,7 @@ class TwoWayAIVoiceService:
         if not self._ai_ready:
             return f"""<?xml version="1.0" encoding="UTF-8"?>
 <Response>
-    <Say voice="Polly.Aditi" language="en-IN">Thank you ji. Please contact the college at {safe_ph}. Goodbye.</Say>
+    <Say voice="Polly.Aditi" language="en-IN">Thank you for your time. Please contact the college at {safe_ph}. Goodbye.</Say>
 </Response>"""
 
         # Stage-aware closing detection
@@ -388,7 +394,7 @@ class TwoWayAIVoiceService:
             if state.turn_count >= 4:
                 speech_for_ai = (
                     parent_speech +
-                    " [Note: parent is wrapping up. Give ONE warm closing sentence and use [END_CALL].]"
+                    " [Note: parent is wrapping up. Give ONE warm closing sentence in English only and use [END_CALL].]"
                 )
             else:
                 # Too early — treat as normal reply, don't close
