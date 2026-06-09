@@ -267,6 +267,6 @@ def reset():
 if __name__ == '__main__':
     os.makedirs('data', exist_ok=True)
     print("\n" + "="*50)
-    print("  🤖 EDUGUARDIAN — GROQ AI VOICE")
+    print("  EDUGUARDIAN -- GROQ AI VOICE")
     print("="*50)
     app.run(debug=True, host='0.0.0.0', port=5000)
