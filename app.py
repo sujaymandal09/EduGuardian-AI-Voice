@@ -17,7 +17,8 @@ app.secret_key = os.getenv("SECRET_KEY", "attendance-guardian-secret")
 
 voice_service = None
 last_results = {}
-call_sid_map = {}   # maps Twilio CallSid → student registration
+call_sid_map = {}       # maps Twilio CallSid → student registration
+silence_count = {}      # maps Twilio CallSid → number of consecutive no-speech events
 
 os.makedirs('data', exist_ok=True)
 CSV_PATH = os.path.join('data', 'students.csv')
@@ -179,7 +180,41 @@ def handle_parent_response():
     print(f"\n📞 CallSid : {call_sid}")
     print(f"   Parent  : \"{parent_speech}\"")
 
-    voice = get_voice_service()
+    voice  = get_voice_service()
+    ngrok  = os.getenv('NGROK_URL', '')
+    phone  = os.getenv('SCHOOL_PHONE', '033-4805-1910')
+
+    # ── No speech detected ────────────────────────────────────────
+    if not parent_speech:
+        count = silence_count.get(call_sid, 0) + 1
+        silence_count[call_sid] = count
+
+        if count == 1:
+            # First silence — one short clarification, then re-open Gather once more
+            print(f"   [Silence #{count}] — asking once")
+            return f"""<?xml version="1.0" encoding="UTF-8"?>
+<Response>
+    <Gather input="speech" language="en-IN"
+            action="{ngrok}/handle-parent-response"
+            method="POST"
+            timeout="5"
+            speechTimeout="auto">
+        <Say voice="Polly.Aditi" language="en-IN">I'm sorry, I couldn't catch that. Please go ahead whenever you're ready.</Say>
+    </Gather>
+    <Say voice="Polly.Aditi" language="en-IN">I wasn't able to hear a response. I will note this and follow up if needed. Thank you for your time. Have a good day.</Say>
+</Response>""", 200, {'Content-Type': 'text/xml'}
+
+        else:
+            # Second (or more) silence — close gracefully, no more retries
+            print(f"   [Silence #{count}] — closing gracefully")
+            silence_count.pop(call_sid, None)   # clean up
+            return f"""<?xml version="1.0" encoding="UTF-8"?>
+<Response>
+    <Say voice="Polly.Aditi" language="en-IN">I couldn't clearly hear the response, so I will conclude here for now. Please feel free to contact us at {phone}. Thank you and have a good day.</Say>
+</Response>""", 200, {'Content-Type': 'text/xml'}
+
+    # ── Speech received — reset silence counter ───────────────────
+    silence_count.pop(call_sid, None)
 
     # Find which student this call belongs to
     registration = call_sid_map.get(call_sid)
@@ -189,32 +224,15 @@ def handle_parent_response():
         if len(active) == 1:
             registration = active[0]
 
-    # No speech detected — ask again
-    if not parent_speech:
-        ngrok   = os.getenv('NGROK_URL', '')
-        phone   = os.getenv('SCHOOL_PHONE', '033-4805-1910')
-        return f"""<?xml version="1.0" encoding="UTF-8"?>
-<Response>
-    <Say voice="alice" language="en-IN">I'm sorry, I didn't catch that. Could you say that again?</Say>
-    <Gather input="speech" language="en-IN"
-            action="{ngrok}/handle-parent-response"
-            method="POST"
-            timeout="5"
-            speechTimeout="auto">
-    </Gather>
-    <Say voice="alice" language="en-IN">Please contact us at {phone}. Goodbye.</Say>
-</Response>""", 200, {'Content-Type': 'text/xml'}
-
     # Hand off to AI
     if registration and hasattr(voice, 'generate_followup_twiml'):
         twiml = voice.generate_followup_twiml(registration, parent_speech)
         return twiml, 200, {'Content-Type': 'text/xml'}
 
-    # Hard fallback
-    phone = os.getenv("SCHOOL_PHONE", "033-4805-1910")
+    # Hard fallback (no registration found)
     return f"""<?xml version="1.0" encoding="UTF-8"?>
 <Response>
-    <Say voice="alice" language="en-IN">Thank you. Please contact the college at {phone}. Goodbye.</Say>
+    <Say voice="Polly.Aditi" language="en-IN">Thank you. Please contact the college at {phone}. Goodbye.</Say>
 </Response>""", 200, {'Content-Type': 'text/xml'}
 
 
@@ -224,10 +242,11 @@ def upload():
         file = request.files.get('file')
         if file and file.filename.endswith('.csv'):
             file.save(CSV_PATH)
-            global voice_service, last_results, call_sid_map
+            global voice_service, last_results, call_sid_map, silence_count
             voice_service = None
             last_results  = {}
             call_sid_map  = {}
+            silence_count = {}
             flash("✅ Uploaded!", "success")
             return redirect(url_for('index'))
         flash("Invalid file!", "error")
@@ -236,10 +255,11 @@ def upload():
 
 @app.route('/reset')
 def reset():
-    global voice_service, last_results, call_sid_map
+    global voice_service, last_results, call_sid_map, silence_count
     voice_service = None
     last_results  = {}
     call_sid_map  = {}
+    silence_count = {}
     flash("✅ Reset!", "success")
     return redirect(url_for('index'))
 
