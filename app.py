@@ -34,15 +34,15 @@ def get_voice_service():
         if twilio_ready and groq_ready:
             from services.twilio_groq_voice import TwoWayAIVoiceService
             voice_service = TwoWayAIVoiceService()
-            print("🤖 2-Way AI Voice (Twilio + Groq)")
+            print("[OK] 2-Way AI Voice (Twilio + Groq)")
         elif twilio_ready:
             from services.twilio_voice_service import TwilioVoiceService
             voice_service = TwilioVoiceService()
-            print("📞 Twilio Voice (1-Way)")
+            print("[OK] Twilio Voice (1-Way)")
         else:
             from services.twilio_groq_voice import TwoWayDemoService
             voice_service = TwoWayDemoService()
-            print("🖥️  Demo Mode (no API keys)")
+            print("[OK] Demo Mode (no API keys)")
     return voice_service
 
 
@@ -177,7 +177,7 @@ def handle_parent_response():
     parent_speech = request.form.get('SpeechResult', '').strip()
     call_sid      = request.form.get('CallSid', '')
 
-    print(f"\n📞 CallSid : {call_sid}")
+    print(f"\n[CALL] CallSid : {call_sid}")
     print(f"   Parent  : \"{parent_speech}\"")
 
     voice  = get_voice_service()
