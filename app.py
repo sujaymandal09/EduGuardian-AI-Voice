@@ -34,15 +34,15 @@ def get_voice_service():
         if twilio_ready and groq_ready:
             from services.twilio_groq_voice import TwoWayAIVoiceService
             voice_service = TwoWayAIVoiceService()
-            print("🤖 2-Way AI Voice (Twilio + Groq)")
+            print("[AI] 2-Way AI Voice (Twilio + Groq)")
         elif twilio_ready:
             from services.twilio_voice_service import TwilioVoiceService
             voice_service = TwilioVoiceService()
-            print("📞 Twilio Voice (1-Way)")
+            print("[CALL] Twilio Voice (1-Way)")
         else:
             from services.twilio_groq_voice import TwoWayDemoService
             voice_service = TwoWayDemoService()
-            print("🖥️  Demo Mode (no API keys)")
+            print("[DEMO] Demo Mode (no API keys)")
     return voice_service
 
 
@@ -177,7 +177,7 @@ def handle_parent_response():
     parent_speech = request.form.get('SpeechResult', '').strip()
     call_sid      = request.form.get('CallSid', '')
 
-    print(f"\n📞 CallSid : {call_sid}")
+    print(f"\n[CALL] CallSid : {call_sid}")
     print(f"   Parent  : \"{parent_speech}\"")
 
     voice  = get_voice_service()
@@ -191,14 +191,15 @@ def handle_parent_response():
 
         if count == 1:
             # First silence — one short clarification, then re-open Gather once more
-            print(f"   [Silence #{count}] — asking once")
+            print(f"   [Silence #{count}] - asking once")
             return f"""<?xml version="1.0" encoding="UTF-8"?>
 <Response>
     <Gather input="speech" language="en-IN"
             action="{ngrok}/handle-parent-response"
             method="POST"
-            timeout="5"
-            speechTimeout="auto">
+            timeout="4"
+            speechTimeout="auto"
+            hints="yes,hello,sorry,busy,free,go ahead,can you hear me,one moment">
         <Say voice="Polly.Aditi" language="en-IN">I'm sorry, I couldn't catch that. Please go ahead whenever you're ready.</Say>
     </Gather>
     <Say voice="Polly.Aditi" language="en-IN">I wasn't able to hear a response. I will note this and follow up if needed. Thank you for your time. Have a good day.</Say>
@@ -206,7 +207,7 @@ def handle_parent_response():
 
         else:
             # Second (or more) silence — close gracefully, no more retries
-            print(f"   [Silence #{count}] — closing gracefully")
+            print(f"   [Silence #{count}] - closing gracefully")
             silence_count.pop(call_sid, None)   # clean up
             return f"""<?xml version="1.0" encoding="UTF-8"?>
 <Response>
@@ -267,6 +268,6 @@ def reset():
 if __name__ == '__main__':
     os.makedirs('data', exist_ok=True)
     print("\n" + "="*50)
-    print("  🤖 EDUGUARDIAN — GROQ AI VOICE")
+    print("  EDUGUARDIAN -- GROQ AI VOICE")
     print("="*50)
     app.run(debug=True, host='0.0.0.0', port=5000)

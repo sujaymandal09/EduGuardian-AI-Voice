@@ -6,6 +6,7 @@ services/twilio_groq_voice.py
 import html
 import logging
 import os
+import re
 import time
 from groq import Groq
 from core.models import CallPayload, NotificationResult
@@ -119,91 +120,48 @@ RESOLUTION:
     dimension_context = {
         "attendance": f"""
 CONCERN: Attendance
-{student_name}'s attendance is low and they risk not being allowed to sit exams.
-Details (USE ONLY THESE FACTS — do not add any other specifics): {details}
-
-Natural flow:
-- After they confirm they're free, briefly introduce the attendance concern in 1-2 sentences.
-- CRITICAL: Your first message about the concern must ALWAYS end with an open question —
-  never a plain statement. Invite the parent to share what's been going on.
-  Example: "...I was hoping you might be able to shed some light on what's been happening?"
-- Listen fully to their answer before suggesting any next steps.
-- If reason is valid — be understanding, give practical advice.
-- If reason is unclear — follow RESOLUTION below.
-- Answer any questions, then wait for the system to handle closing.
+{student_name}'s attendance is low. Details: {details}
+Ask an open question. Listen. Then follow RESOLUTION.
 
 {risk_resolution}
 """,
         "performance": f"""
 CONCERN: Academic Performance
-{student_name} is struggling with grades.
-Details (USE ONLY THESE FACTS — do not add any other specifics): {details}
-
-Natural flow:
-- After they confirm they're free, briefly introduce the academic concern in 1-2 sentences.
-- CRITICAL: Your first message about the concern must ALWAYS end with an open question —
-  never a plain statement. Invite the parent to share the home situation.
-  Example: "...I was wondering if you've noticed anything at home that might be affecting him?"
-- Only ask what hasn't been mentioned. Don't interrogate.
-- Follow RESOLUTION below.
-- Close with encouragement.
+{student_name} is struggling with grades. Details: {details}
+Ask an open question. Listen. Then follow RESOLUTION.
 
 {risk_resolution}
 """,
         "behavior": f"""
 CONCERN: Behaviour
-{student_name} has had behavioural incidents.
-Details (USE ONLY THESE FACTS — do not add any other specifics): {details}
-
-Natural flow:
-- After they confirm they're free, gently introduce the behavioural concern in 1-2 sentences.
-- CRITICAL: Your first message about the concern must ALWAYS end with an open question —
-  never a plain statement. Invite the parent to share how the child has been at home.
-  Example: "...I wanted to ask — how has he been at home lately?"
-- Refer ONLY to the incident details given above. Do NOT invent names of clubs, teams,
-  teachers, or events that were not mentioned in those details.
-- If parent mentions stress, sadness, depression — acknowledge with empathy FIRST.
-- Follow RESOLUTION below.
-- Close warmly.
+{student_name} has had behavioural incidents. Details: {details}
+Ask an open question. Listen. Then follow RESOLUTION.
 
 {risk_resolution}
 """,
     }.get(dim_key, f"""
 CONCERN: {dimension.upper()}
-Details (USE ONLY THESE FACTS): {details}
-- Introduce the concern briefly, then ALWAYS end with an open question.
-- Never deliver the concern as a plain statement with nothing for the parent to respond to.
+Details: {details}
+Ask an open question. Listen. Then follow RESOLUTION.
 
 {risk_resolution}
 """)
 
     meeting_rules = {
-        "HIGH": """
-MEETING RULES (HIGH risk):
-- Suggest tomorrow at 10 AM.
-- If parent says not available: persuade ONCE warmly — like a caring teacher.
-  Example: "I completely understand. I just want to mention that the situation
-  is quite urgent and the sooner we can meet, the better it will be for your child.
-  Is there any possibility this week at all?"
-- After that ONE gentle push, IMMEDIATELY accept whatever time they give.
-- Confirm their date warmly and move to farewell.
-""",
-        "MEDIUM": """
-MEETING RULES (MEDIUM risk):
-- The default outcome is monitoring, not a meeting.
-- Tell the parent clearly: "We'll monitor closely, and if this continues we will
-  need to meet." Only offer a meeting if the parent requests one.
-""",
-        "LOW": """
-MEETING RULES (LOW risk):
-- No meeting needed. Close with encouragement.
-- Offer the school contact number so parents can reach out if they want.
-""",
+        "HIGH": "Suggest meeting ASAP. If parent unavailable, persuade once warmly then accept their time.",
+        "MEDIUM": "Default is monitoring. Say we'll watch closely, escalate if needed. Only offer meeting if parent asks.",
+        "LOW": "No meeting needed. End on encouraging note.",
     }.get(risk_level.upper(), "Suggest meeting if helpful. Accept whatever time parent proposes.")
 
     return f"""You are Priya — a warm, experienced school counselor calling from {school}.
 You are speaking with {parent_name}, parent of {student_name}.
 School phone: {phone}
+
+YOUR ROLE:
+- You are a school counselor, NOT a parent.
+- Listen. Empathize. Ask clarifying questions.
+- Never tell the parent what to do. Never give parenting advice.
+- Your role is to UNDERSTAND the issue, then suggest NEXT STEPS (meeting, monitoring, resources).
 
 YOUR PERSONALITY:
 - You sound like a real human. Warm, calm, genuinely caring.
@@ -214,7 +172,7 @@ YOUR PERSONALITY:
 - Never robotic. Never scripted. Never repeat yourself.
 - 2 to 3 sentences per reply. Phone calls need space.
 - Use contractions: I'll, we'll, that's, it's, don't.
-- Vary your sentence starters. Don't always begin with the parent's name.
+- Vary your sentence starters.
 
 STRICT CALL FLOW — FOLLOW THIS ORDER:
 1. Parent confirms who they are → acknowledge warmly (e.g. "I'm so glad I reached you.")
@@ -317,7 +275,20 @@ class ConversationState:
 #  MAIN SERVICE
 # ─────────────────────────────────────────────────────────────────
 class TwoWayAIVoiceService:
-    MODEL = "llama-3.3-70b-versatile"
+    MODEL = "llama-3.1-8b-instant"
+    MAX_HISTORY = 12   # keep last 12 messages (~6 exchanges) to limit input tokens
+    # Hint words boost ASR probability for these terms over similar-sounding proper nouns
+    # (e.g. "sick" over "Sikh", "absent" over ambiguous homophones in en-IN)
+    ASR_HINTS = (
+        "sick,fever,cold,flu,ill,unwell,doctor,hospital,medicine,better,well,fine,"
+        "absent,absence,attendance,homework,exam,test,class,grade,marks,result,subject,"
+        "teacher,principal,school,college,classroom,studying,study,tuition,"
+        "yes,no,okay,sure,busy,free,available,sorry,understood,question,concern,"
+        "meeting,tomorrow,today,this week,next week,morning,afternoon,evening,"
+        "son,daughter,child,children,home,family,work,office,worried,stress,pressure,"
+        "behaviour,behavior,incident,fight,argument,trouble,issue,problem,"
+        "improving,improved,trying,effort,support,help,advice,counsellor,counselor"
+    )
 
     def __init__(self):
         self._twilio_sid   = os.getenv("TWILIO_ACCOUNT_SID")
@@ -334,13 +305,23 @@ class TwoWayAIVoiceService:
         if self._twilio_ready:
             from twilio.rest import Client
             self._client = Client(self._twilio_sid, self._twilio_token)
-            print("✅ Twilio Connected")
+            print("[OK] Twilio Connected")
 
         if self._ai_ready:
             self._groq = Groq(api_key=self._groq_key)
-            print(f"✅ Groq Connected  [{self.MODEL}]")
+            print(f"[OK] Groq Connected  [{self.MODEL}]")
+            # Pre-warm the API to reduce cold-start latency on first call
+            try:
+                self._groq.chat.completions.create(
+                    model=self.MODEL,
+                    messages=[{"role": "user", "content": "Hi"}],
+                    max_tokens=10,
+                )
+                print("[OK] Groq Pre-warmed")
+            except Exception as e:
+                print(f"[WARN] Groq warmup failed: {str(e)[:60]}")
         else:
-            print("⚠️  GROQ_API_KEY not set — Demo mode active")
+            print("[WARN] GROQ_API_KEY not set - Demo mode active")
 
         self._conversations: dict[str, ConversationState] = {}
         self.calls_made = []
@@ -352,13 +333,15 @@ class TwoWayAIVoiceService:
         state.advance_stage()
 
         try:
+            # Only send the last MAX_HISTORY messages to keep input tokens low
+            recent = state.messages[-self.MAX_HISTORY:]
             response = self._groq.chat.completions.create(
                 model=self.MODEL,
                 messages=[
                     {"role": "system", "content": state.system_prompt}
-                ] + state.messages,
-                temperature=0.75,
-                max_tokens=120,
+                ] + recent,
+                temperature=0.5,
+                max_tokens=80,
             )
             ai_text = response.choices[0].message.content.strip()
         except Exception as e:
@@ -380,30 +363,48 @@ class TwoWayAIVoiceService:
                   .strip())
         return spoken, end_call
 
-    # ── Build TwiML — Say inside Gather for interruptibility ──────
+    @staticmethod
+    def _split_sentences(text: str) -> list:
+        """Split into individual sentences for per-sentence barge-in Gathers."""
+        parts = re.split(r'(?<=[.!?])\s+', text.strip())
+        return [p.strip() for p in parts if p.strip()]
+
+    # ── Build TwiML — one Gather per sentence for true barge-in ───
+    # Each non-final sentence uses timeout="0": if the parent speaks
+    # during it, that speech is captured immediately; if not, Twilio
+    # falls through to the next sentence with zero delay.
+    # Only the last sentence Gather waits for the parent's reply.
     def _twiml(self, spoken: str, end_call: bool) -> str:
-        safe    = html.escape(spoken)
         safe_ph = html.escape(self._phone)
         webhook = f"{self._ngrok_url}/handle-parent-response"
 
         if end_call:
             return f"""<?xml version="1.0" encoding="UTF-8"?>
 <Response>
-    <Say voice="Polly.Aditi" language="en-IN">{safe}</Say>
+    <Say voice="Polly.Aditi" language="en-IN">{html.escape(spoken)}</Say>
     <Pause length="1"/>
 </Response>"""
-        else:
-            return f"""<?xml version="1.0" encoding="UTF-8"?>
-<Response>
-    <Gather input="speech" language="en-IN"
-            action="{webhook}"
-            method="POST"
-            timeout="6"
-            speechTimeout="auto">
-        <Say voice="Polly.Aditi" language="en-IN">{safe}</Say>
-    </Gather>
-    <Say voice="Polly.Aditi" language="en-IN">I didn't catch that. Please call us at {safe_ph}. Goodbye.</Say>
-</Response>"""
+
+        sentences = self._split_sentences(spoken) or [spoken]
+        gather_blocks = []
+        for i, sentence in enumerate(sentences):
+            is_last = (i == len(sentences) - 1)
+            t = "4" if is_last else "0"
+            gather_blocks.append(
+                f'    <Gather input="speech" language="en-IN"\n'
+                f'            action="{webhook}"\n'
+                f'            method="POST"\n'
+                f'            timeout="{t}"\n'
+                f'            speechTimeout="auto"\n'
+                f'            hints="{self.ASR_HINTS}">\n'
+                f'        <Say voice="Polly.Aditi" language="en-IN">{html.escape(sentence)}</Say>\n'
+                f'    </Gather>'
+            )
+
+        fallback = (f'    <Say voice="Polly.Aditi" language="en-IN">'
+                    f"I didn't catch that. Please call us at {safe_ph}. Goodbye.</Say>")
+        body = "\n".join(gather_blocks) + "\n" + fallback
+        return f'<?xml version="1.0" encoding="UTF-8"?>\n<Response>\n{body}\n</Response>'
 
     # ── Opening TwiML ─────────────────────────────────────────────
     def _opening_twiml(self, payload: CallPayload) -> str:
@@ -418,8 +419,9 @@ class TwoWayAIVoiceService:
     <Gather input="speech" language="en-IN"
             action="{webhook}"
             method="POST"
-            timeout="8"
-            speechTimeout="auto">
+            timeout="5"
+            speechTimeout="auto"
+            hints="yes,speaking,hello,this is,yes speaking,yes this is,who is this,wrong number,busy,call back">
         <Say voice="Polly.Aditi" language="en-IN">Hello! Am I speaking with {safe_parent}? This is Priya calling from {safe_school}, regarding your child {safe_student}.</Say>
     </Gather>
     <Say voice="Polly.Aditi" language="en-IN">I didn't hear a response. Please call us at {safe_phone}. Goodbye.</Say>
@@ -481,9 +483,9 @@ class TwoWayAIVoiceService:
         if end_call:
             state.ended = True
 
-        print(f"  🎤 Parent : \"{parent_speech}\"")
-        print(f"  🤖 Priya  : \"{spoken[:90]}...\"")
-        print(f"  📊 Turn: {state.turn_count} | Stage: {state.stage} | End: {end_call}")
+        print(f"  [P] Parent : \"{parent_speech}\"")
+        print(f"  [AI] Priya  : \"{spoken[:90]}...\"")
+        print(f"  [INFO] Turn: {state.turn_count} | Stage: {state.stage} | End: {end_call}")
 
         return self._twiml(spoken, end_call)
 
@@ -498,25 +500,25 @@ class TwoWayAIVoiceService:
 
         state = ConversationState(payload, self._school, self._phone)
         self._conversations[payload.registration] = state
-        print(f"✅ Ready: {payload.student_name} [{payload.dimension.upper()} / {payload.risk_level}]")
+        print(f"[OK] Ready: {payload.student_name} [{payload.dimension.upper()} / {payload.risk_level}]")
 
         twiml = self._opening_twiml(payload)
 
         try:
-            print(f"\n📞 Calling {payload.parent_name} ({payload.to_number})...")
+            print(f"\n[CALL] Calling {payload.parent_name} ({payload.to_number})...")
             call = self._client.calls.create(
                 to=payload.to_number,
                 from_=self._from_number,
                 twiml=twiml
             )
             self.calls_made.append(payload)
-            print(f"   ✅ SID: {call.sid}\n")
+            print(f"   [OK] SID: {call.sid}\n")
             return NotificationResult(
                 success=True, sid=call.sid,
                 student_id=payload.registration, channel="ai_2way_groq"
             )
         except Exception as e:
-            print(f"   ❌ {str(e)[:120]}")
+            print(f"   [ERR] {str(e)[:120]}")
             return NotificationResult(
                 success=False, error_message=str(e),
                 student_id=payload.registration
@@ -525,7 +527,7 @@ class TwoWayAIVoiceService:
     # ── make_batch_calls ──────────────────────────────────────────
     def make_batch_calls(self, payloads: list) -> dict:
         results = {"total": len(payloads), "successful": 0, "failed": 0, "details": []}
-        print(f"\n🤖 Groq 2-Way Calls: {len(payloads)}\n")
+        print(f"\n[AI] Groq 2-Way Calls: {len(payloads)}\n")
         for i, p in enumerate(payloads, 1):
             print(f"[{i}/{len(payloads)}] {p.student_name} [{p.dimension.upper()}]")
             r = self.make_call(p)
@@ -540,7 +542,7 @@ class TwoWayAIVoiceService:
             if r.success: results["successful"] += 1
             else:         results["failed"] += 1
             time.sleep(2)
-        print(f"\n✅ {results['successful']}/{results['total']}\n")
+        print(f"\n[OK] {results['successful']}/{results['total']}\n")
         return results
 
 
@@ -556,11 +558,11 @@ class TwoWayDemoService:
 
     def make_call(self, payload: CallPayload) -> NotificationResult:
         self.calls_made.append(payload)
-        print(f"\n{'═'*56}")
-        print(f"  🖥️  DEMO MODE — {payload.dimension.upper()}")
+        print(f"\n{'='*56}")
+        print(f"  DEMO MODE - {payload.dimension.upper()}")
         print(f"  Student: {payload.student_name}   Parent: {payload.parent_name}")
         print(f"  (Set GROQ_API_KEY for real AI calls)")
-        print(f"{'═'*56}\n")
+        print(f"{'='*56}\n")
         return NotificationResult(
             success=True, sid=f"DEMO_{len(self.calls_made):03d}",
             student_id=payload.registration, channel="demo"
