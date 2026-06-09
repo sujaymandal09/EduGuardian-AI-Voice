@@ -23,7 +23,7 @@ try:
     )
     
     print(f"✅ Gemini says: {response.text}")
-    print("✅ GEMINI IS WORKING!")
+    print("✅ GEMINI IS WORKING")
     
 except Exception as e:
     print(f"❌ Error: {e}")
