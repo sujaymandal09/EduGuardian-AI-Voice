@@ -340,6 +340,16 @@ class TwoWayAIVoiceService:
         if self._ai_ready:
             self._groq = Groq(api_key=self._groq_key)
             print(f"✅ Groq Connected  [{self.MODEL}]")
+            # Pre-warm the API to reduce cold-start latency on first call
+            try:
+                self._groq.chat.completions.create(
+                    model=self.MODEL,
+                    messages=[{"role": "user", "content": "Hi"}],
+                    max_tokens=10,
+                )
+                print("✅ Groq Pre-warmed")
+            except Exception as e:
+                pass  # Warmup is optional
         else:
             print("⚠️  GROQ_API_KEY not set — Demo mode active")
 
@@ -353,13 +363,15 @@ class TwoWayAIVoiceService:
         state.advance_stage()
 
         try:
+            # Cap message history to last 12 messages to limit input tokens
+            recent = state.messages[-self.MAX_HISTORY:]
             response = self._groq.chat.completions.create(
                 model=self.MODEL,
                 messages=[
                     {"role": "system", "content": state.system_prompt}
-                ] + state.messages,
-                temperature=0.75,
-                max_tokens=120,
+                ] + recent,
+                temperature=0.5,
+                max_tokens=80,
             )
             ai_text = response.choices[0].message.content.strip()
         except Exception as e:
