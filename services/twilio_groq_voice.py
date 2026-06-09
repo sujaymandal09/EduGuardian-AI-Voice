@@ -21,6 +21,7 @@ STAGE_INTRO        = "intro"         # Just confirmed who they are
 STAGE_AVAILABILITY = "availability"  # Asked if free — waiting for answer
 STAGE_CONVERSATION = "conversation"  # Main discussion happening
 STAGE_SOLUTION     = "solution"      # Advice / meeting suggested
+STAGE_FAREWELL     = "farewell"      # Asked "anything else?" — waiting for final answer
 STAGE_CLOSING      = "closing"       # Wrapping up
 
 
@@ -71,7 +72,7 @@ def _parent_wants_to_end(speech: str, stage: str) -> bool:
         return True
 
     # Short affirmatives only close the call AFTER solution has been given
-    if stage in (STAGE_SOLUTION, STAGE_CLOSING):
+    if stage in (STAGE_SOLUTION, STAGE_FAREWELL, STAGE_CLOSING):
         if text in LATE_STAGE_CLOSING:
             return True
 
@@ -86,45 +87,94 @@ def _build_counselor_prompt(school, phone, student_name, parent_name,
 
     dim_key = dimension.lower().replace("behaviour", "behavior").strip()
 
+    risk_resolution = {
+        "HIGH": f"""
+RESOLUTION (HIGH risk):
+- A face-to-face meeting is essential. Propose it firmly but warmly.
+- Suggest tomorrow at 10 AM as the first option.
+- If unavailable, accept any time this week — but make clear it is important.
+- Do NOT accept monitoring alone as the outcome for a high-risk case.
+""",
+        "MEDIUM": f"""
+RESOLUTION (MEDIUM risk):
+- Reassure the parent that you will monitor the situation closely.
+- Say clearly: "We'll keep a very close eye on this over the next week or two,
+  and if things don't improve we will need to meet in person."
+- Offer a meeting only if the parent wants one — do not push.
+- The outcome is: monitoring with escalation path, not a meeting by default.
+""",
+        "LOW": f"""
+RESOLUTION (LOW risk):
+- End on a genuinely positive note.
+- Acknowledge what {student_name} is doing well, even while raising the concern.
+- No meeting needed. Just encouragement and practical home advice.
+- Example close: "I just wanted to flag it early so we can nip it in the bud together.
+  {student_name} is doing well overall and I have every confidence they'll turn it around."
+""",
+    }.get(risk_level.upper(), f"""
+RESOLUTION:
+- Suggest meeting if helpful. Accept whatever time parent proposes.
+""")
+
     dimension_context = {
         "attendance": f"""
 CONCERN: Attendance
 {student_name}'s attendance is low and they risk not being allowed to sit exams.
-Details: {details}
+Details (USE ONLY THESE FACTS — do not add any other specifics): {details}
 
 Natural flow:
-- After they confirm they're free, briefly explain the attendance concern.
-- Ask warmly: do they know why their child has been missing classes? Listen fully.
+- After they confirm they're free, briefly introduce the attendance concern in 1-2 sentences.
+- CRITICAL: Your first message about the concern must ALWAYS end with an open question —
+  never a plain statement. Invite the parent to share what's been going on.
+  Example: "...I was hoping you might be able to shed some light on what's been happening?"
+- Listen fully to their answer before suggesting any next steps.
 - If reason is valid — be understanding, give practical advice.
-- If reason is unclear — suggest a meeting. See MEETING RULES.
-- Answer any questions, then close warmly.
+- If reason is unclear — follow RESOLUTION below.
+- Answer any questions, then wait for the system to handle closing.
+
+{risk_resolution}
 """,
         "performance": f"""
 CONCERN: Academic Performance
-{student_name} is struggling with grades. Details: {details}
+{student_name} is struggling with grades.
+Details (USE ONLY THESE FACTS — do not add any other specifics): {details}
 
 Natural flow:
-- After they confirm they're free, gently explain the academic concern.
-- Understand the home situation naturally: study habits, distractions, extra coaching.
-  Only ask what hasn't been mentioned. Don't interrogate.
-- Suggest meeting if needed. See MEETING RULES.
+- After they confirm they're free, briefly introduce the academic concern in 1-2 sentences.
+- CRITICAL: Your first message about the concern must ALWAYS end with an open question —
+  never a plain statement. Invite the parent to share the home situation.
+  Example: "...I was wondering if you've noticed anything at home that might be affecting him?"
+- Only ask what hasn't been mentioned. Don't interrogate.
+- Follow RESOLUTION below.
 - Close with encouragement.
+
+{risk_resolution}
 """,
         "behavior": f"""
 CONCERN: Behaviour
-{student_name} has had behavioural incidents. Details: {details}
+{student_name} has had behavioural incidents.
+Details (USE ONLY THESE FACTS — do not add any other specifics): {details}
 
 Natural flow:
-- After they confirm they're free, raise the concern gently, framing it as caring.
-- Ask how the child has been at home. Listen genuinely.
+- After they confirm they're free, gently introduce the behavioural concern in 1-2 sentences.
+- CRITICAL: Your first message about the concern must ALWAYS end with an open question —
+  never a plain statement. Invite the parent to share how the child has been at home.
+  Example: "...I wanted to ask — how has he been at home lately?"
+- Refer ONLY to the incident details given above. Do NOT invent names of clubs, teams,
+  teachers, or events that were not mentioned in those details.
 - If parent mentions stress, sadness, depression — acknowledge with empathy FIRST.
-- Suggest meeting. See MEETING RULES.
+- Follow RESOLUTION below.
 - Close warmly.
+
+{risk_resolution}
 """,
     }.get(dim_key, f"""
 CONCERN: {dimension.upper()}
-Details: {details}
-Warm, natural conversation. Understand, offer help, suggest meeting if needed.
+Details (USE ONLY THESE FACTS): {details}
+- Introduce the concern briefly, then ALWAYS end with an open question.
+- Never deliver the concern as a plain statement with nothing for the parent to respond to.
+
+{risk_resolution}
 """)
 
     meeting_rules = {
@@ -136,17 +186,18 @@ MEETING RULES (HIGH risk):
   is quite urgent and the sooner we can meet, the better it will be for your child.
   Is there any possibility this week at all?"
 - After that ONE gentle push, IMMEDIATELY accept whatever time they give.
-- Confirm their date warmly and move to closing.
+- Confirm their date warmly and move to farewell.
 """,
         "MEDIUM": """
 MEETING RULES (MEDIUM risk):
-- Suggest meeting this week if helpful.
-- If parent proposes any other time → accept immediately.
+- The default outcome is monitoring, not a meeting.
+- Tell the parent clearly: "We'll monitor closely, and if this continues we will
+  need to meet." Only offer a meeting if the parent requests one.
 """,
         "LOW": """
 MEETING RULES (LOW risk):
-- Meeting is optional. Offer only if it feels right.
-- Accept or skip with no pressure.
+- No meeting needed. Close with encouragement.
+- Offer the school contact number so parents can reach out if they want.
 """,
     }.get(risk_level.upper(), "Suggest meeting if helpful. Accept whatever time parent proposes.")
 
@@ -192,11 +243,15 @@ INTERRUPTION HANDLING:
 - Never repeat a sentence they interrupted.
 
 CLOSING:
-- Only close the call when the conversation has naturally reached its end —
-  after you have explained the concern, had a discussion, and suggested next steps.
-- Do NOT close after just 1 or 2 turns. The conversation should feel complete.
-- When parent gives a clear goodbye signal AFTER the main conversation —
-  give ONE warm closing sentence then [END_CALL].
+- Do NOT proactively end the call or ask farewell questions on your own.
+- The system will tell you exactly when to ask "anything else?" and when to say goodbye,
+  by injecting a [Note: ...] instruction into the conversation.
+- When you see [Note: ... ask if the parent has any other questions ... Use [CONTINUE]]:
+  ask warmly in one sentence and use [CONTINUE]. Nothing else.
+- When you see [Note: Parent has confirmed they have nothing more ... Use [END_CALL]]:
+  give ONE warm closing sentence, mention school hours (Monday to Friday, 9 AM to 4 PM)
+  and the school number {phone}, then use [END_CALL].
+- Never ask "is there anything else?" unless the system note instructs you to.
 
 SPEECH STYLE:
 - Spoken, natural sentences. Not formal written English.
@@ -209,10 +264,14 @@ STRICT RULES:
 3. ONLY discuss {dimension.upper()}.
 4. 2 to 3 sentences per reply maximum.
 5. Every single word in your reply must be English. Remove any non-English word before responding.
-6. End EVERY reply with one control tag on its own line:
+6. NEVER invent specific details — such as team names, teacher names, club names, or
+   incident specifics — that were not given to you in the concern details above.
+   If a parent raises something you have no data on, say you'd like to discuss the
+   full details when you meet rather than guessing.
+7. End EVERY reply with one control tag on its own line:
    [CONTINUE]  — keep going
-   [END_CALL]  — end now (only after a complete conversation)
-7. Tag is for system only — never spoken aloud.
+   [END_CALL]  — end now (only after farewell step 2 is complete)
+8. Tag is for system only — never spoken aloud.
 
 You are in a REAL phone call. React naturally. Be human. Speak English only.
 """.strip()
@@ -243,14 +302,15 @@ class ConversationState:
 
     def advance_stage(self):
         """Move stage forward based on turn count as a rough heuristic."""
+        # STAGE_FAREWELL and STAGE_CLOSING are set explicitly — never overwrite them here
+        if self.stage in (STAGE_FAREWELL, STAGE_CLOSING):
+            return
         if self.stage == STAGE_INTRO and self.turn_count >= 1:
             self.stage = STAGE_AVAILABILITY
         elif self.stage == STAGE_AVAILABILITY and self.turn_count >= 2:
             self.stage = STAGE_CONVERSATION
         elif self.stage == STAGE_CONVERSATION and self.turn_count >= 5:
             self.stage = STAGE_SOLUTION
-        elif self.stage == STAGE_SOLUTION and self.turn_count >= 7:
-            self.stage = STAGE_CLOSING
 
 
 # ─────────────────────────────────────────────────────────────────
@@ -390,12 +450,25 @@ class TwoWayAIVoiceService:
 
         # Stage-aware closing detection
         if _parent_wants_to_end(parent_speech, state.stage):
-            # Only hint to close if we've had a real conversation (turn 4+)
             if state.turn_count >= 4:
-                speech_for_ai = (
-                    parent_speech +
-                    " [Note: parent is wrapping up. Give ONE warm closing sentence in English only and use [END_CALL].]"
-                )
+                if state.stage == STAGE_FAREWELL:
+                    # Parent confirmed nothing more — give final goodbye with working hours
+                    speech_for_ai = (
+                        parent_speech +
+                        " [Note: Parent has confirmed they have nothing more to discuss."
+                        " Give ONE warm closing sentence in English only."
+                        " Mention the school is available Monday to Friday, 9 AM to 4 PM,"
+                        " and they can call at any time. Use [END_CALL].]"
+                    )
+                else:
+                    # First closing signal — move to farewell, ask if anything else
+                    state.stage = STAGE_FAREWELL
+                    speech_for_ai = (
+                        parent_speech +
+                        " [Note: Before ending, warmly ask if the parent has any other"
+                        " questions or concerns they'd like to discuss. Do NOT use"
+                        " [END_CALL] yet. Use [CONTINUE].]"
+                    )
             else:
                 # Too early — treat as normal reply, don't close
                 speech_for_ai = parent_speech
