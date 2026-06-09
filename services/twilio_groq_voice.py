@@ -335,11 +335,11 @@ class TwoWayAIVoiceService:
         if self._twilio_ready:
             from twilio.rest import Client
             self._client = Client(self._twilio_sid, self._twilio_token)
-            print("✅ Twilio Connected")
+            print("[OK] Twilio Connected")
 
         if self._ai_ready:
             self._groq = Groq(api_key=self._groq_key)
-            print(f"✅ Groq Connected  [{self.MODEL}]")
+            print(f"[OK] Groq Connected  [{self.MODEL}]")
             # Pre-warm the API to reduce cold-start latency on first call
             try:
                 self._groq.chat.completions.create(
@@ -347,11 +347,11 @@ class TwoWayAIVoiceService:
                     messages=[{"role": "user", "content": "Hi"}],
                     max_tokens=10,
                 )
-                print("✅ Groq Pre-warmed")
+                print("[OK] Groq Pre-warmed")
             except Exception as e:
                 pass  # Warmup is optional
         else:
-            print("⚠️  GROQ_API_KEY not set — Demo mode active")
+            print("[WARN]  GROQ_API_KEY not set — Demo mode active")
 
         self._conversations: dict[str, ConversationState] = {}
         self.calls_made = []
@@ -494,9 +494,9 @@ class TwoWayAIVoiceService:
         if end_call:
             state.ended = True
 
-        print(f"  🎤 Parent : \"{parent_speech}\"")
-        print(f"  🤖 Priya  : \"{spoken[:90]}...\"")
-        print(f"  📊 Turn: {state.turn_count} | Stage: {state.stage} | End: {end_call}")
+        print(f"  [P] Parent : \"{parent_speech}\"")
+        print(f"  [AI] Priya  : \"{spoken[:90]}...\"")
+        print(f"  [INFO] Turn: {state.turn_count} | Stage: {state.stage} | End: {end_call}")
 
         return self._twiml(spoken, end_call)
 
@@ -511,25 +511,25 @@ class TwoWayAIVoiceService:
 
         state = ConversationState(payload, self._school, self._phone)
         self._conversations[payload.registration] = state
-        print(f"✅ Ready: {payload.student_name} [{payload.dimension.upper()} / {payload.risk_level}]")
+        print(f"[OK] Ready: {payload.student_name} [{payload.dimension.upper()} / {payload.risk_level}]")
 
         twiml = self._opening_twiml(payload)
 
         try:
-            print(f"\n📞 Calling {payload.parent_name} ({payload.to_number})...")
+            print(f"\n[CALL] Calling {payload.parent_name} ({payload.to_number})...")
             call = self._client.calls.create(
                 to=payload.to_number,
                 from_=self._from_number,
                 twiml=twiml
             )
             self.calls_made.append(payload)
-            print(f"   ✅ SID: {call.sid}\n")
+            print(f"   [OK] SID: {call.sid}\n")
             return NotificationResult(
                 success=True, sid=call.sid,
                 student_id=payload.registration, channel="ai_2way_groq"
             )
         except Exception as e:
-            print(f"   ❌ {str(e)[:120]}")
+            print(f"   [ERR] {str(e)[:120]}")
             return NotificationResult(
                 success=False, error_message=str(e),
                 student_id=payload.registration
@@ -538,7 +538,7 @@ class TwoWayAIVoiceService:
     # ── make_batch_calls ──────────────────────────────────────────
     def make_batch_calls(self, payloads: list) -> dict:
         results = {"total": len(payloads), "successful": 0, "failed": 0, "details": []}
-        print(f"\n🤖 Groq 2-Way Calls: {len(payloads)}\n")
+        print(f"\n[AI] Groq 2-Way Calls: {len(payloads)}\n")
         for i, p in enumerate(payloads, 1):
             print(f"[{i}/{len(payloads)}] {p.student_name} [{p.dimension.upper()}]")
             r = self.make_call(p)
@@ -553,7 +553,7 @@ class TwoWayAIVoiceService:
             if r.success: results["successful"] += 1
             else:         results["failed"] += 1
             time.sleep(2)
-        print(f"\n✅ {results['successful']}/{results['total']}\n")
+        print(f"\n[OK] {results['successful']}/{results['total']}\n")
         return results
 
 
