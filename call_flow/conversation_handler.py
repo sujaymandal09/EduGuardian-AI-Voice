@@ -1,7 +1,7 @@
 """
 call_flow/conversation_handler.py
 ──────────────────────────────────
-PERSON 2: CONVERSATION MODULE - ENGLISH VERSION
+PERSON 2: CONVERSATION MODULE - ENGLISH ONLY VERSION
 """
 import logging
 import random
@@ -11,14 +11,14 @@ logger = logging.getLogger(__name__)
 
 
 class ConversationHandler:
-    """Handles the conversation portion of the call in English."""
+    """Handles the conversation portion of the call in English only."""
     
     def __init__(self, school_name, school_phone):
         self.school = school_name
         self.phone = school_phone
     
     def handle_parent_speech(self, chat, parent_speech: str, student_data: dict = None) -> str:
-        """Process parent speech and generate AI response in English."""
+        """Process parent speech and generate AI response in English only."""
         if not chat:
             return self._get_fallback_message()
 
@@ -26,7 +26,9 @@ class ConversationHandler:
         user_message = (
             f"{context}\n"
             f"Parent said: \"{parent_speech}\"\n"
-            f"Respond naturally in English. Keep it short (2-3 sentences)."
+            f"Respond naturally in clear, professional English only. "
+            f"Do not use any Hindi or regional language words (no ji, haan, accha, bilkul, theek hai, etc.). "
+            f"Keep it short (2-3 sentences)."
         )
 
         # Append user turn to history
