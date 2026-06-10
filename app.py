@@ -23,8 +23,9 @@ silence_count = {}      # maps Twilio CallSid → number of consecutive no-speec
 os.makedirs('data', exist_ok=True)
 CSV_PATH = os.path.join('data', 'students.csv')
 
-# ── Weekly meeting slot rollover ──────────────────────────────────
-from services.schedule_manager import ScheduleManager
+# ── Sync schedule from Weekly_Schedule.csv, then roll over week ───
+from services.schedule_manager import ScheduleManager, sync_from_weekly_csv
+sync_from_weekly_csv()
 ScheduleManager().reset_week_if_needed()
 # ─────────────────────────────────────────────────────────────────
 
