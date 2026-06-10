@@ -1,10 +1,10 @@
 registration,name,parent_name,parent_phone,attendance_pct,attendance_total,attendance_attended,consecutive_absences,performance_grade,performance_remarks,behavior_incidents,behavior_status,language
-REG-001,Aarav Patel,Rajesh Patel,+918515063685,65,50,33,5,C,Poor performance in Math,3,Warning,en
+REG-001,Aarav Patel,Rajesh Patel,+919101810329,65,50,33,5,C,Poor performance in Math,3,Warning,en
 REG-002,Diya Sharma,Priya Sharma,+918515063602,92,50,46,0,A,Excellent student,0,Excellent,en
 REG-003,Arjun Singh,Vikram Singh,+918515063603,78,50,39,2,B,Good but inconsistent,1,Good,hi
 REG-004,Ananya Gupta,Sunita Gupta,+918515063604,55,50,28,7,D,Very poor performance,5,Critical,en
 REG-005,Vihaan Kumar,Deepak Kumar,+918515063605,88,50,44,1,B+,Above average,0,Good,hi
-REG-006,Saanvi Joshi,Neha Joshi,+918515063606,72,50,36,3,C,Failing in Science,2,Warning,en
+REG-006,Saanvi Joshi,Neha Joshi,+919101810329,72,50,36,3,C,Failing in Science,2,Warning,en
 REG-007,Reyansh Malhotra,Ravi Malhotra,+919339517622,45,50,23,8,F,At risk of failing,6,Critical,en
 REG-008,Anika Verma,Pooja Verma,+918515063608,95,50,48,0,A,Top performer,0,Excellent,en
 REG-009,Kabir Kapoor,Amit Kapoor,+918515063609,70,50,35,4,C-,Struggling in English,1,Warning,hi
