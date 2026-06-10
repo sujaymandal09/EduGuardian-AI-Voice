@@ -23,6 +23,11 @@ silence_count = {}      # maps Twilio CallSid → number of consecutive no-speec
 os.makedirs('data', exist_ok=True)
 CSV_PATH = os.path.join('data', 'students.csv')
 
+# ── Weekly meeting slot rollover ──────────────────────────────────
+from services.schedule_manager import ScheduleManager
+ScheduleManager().reset_week_if_needed()
+# ─────────────────────────────────────────────────────────────────
+
 
 def get_voice_service():
     """Pick the right service based on available API keys."""
@@ -161,7 +166,6 @@ def call_selective():
     voice   = get_voice_service()
     results = voice.make_batch_calls(payloads)
 
-    # Store CallSid → registration so webhook finds the right conversation
     for detail in results.get("details", []):
         sid = detail.get("sid")
         reg = detail.get("registration")
@@ -190,7 +194,6 @@ def handle_parent_response():
         silence_count[call_sid] = count
 
         if count == 1:
-            # First silence — one short clarification, then re-open Gather once more
             print(f"   [Silence #{count}] — asking once")
             return f"""<?xml version="1.0" encoding="UTF-8"?>
 <Response>
@@ -205,9 +208,8 @@ def handle_parent_response():
 </Response>""", 200, {'Content-Type': 'text/xml'}
 
         else:
-            # Second (or more) silence — close gracefully, no more retries
             print(f"   [Silence #{count}] — closing gracefully")
-            silence_count.pop(call_sid, None)   # clean up
+            silence_count.pop(call_sid, None)
             return f"""<?xml version="1.0" encoding="UTF-8"?>
 <Response>
     <Say voice="Polly.Aditi" language="en-IN">I couldn't clearly hear the response, so I will conclude here for now. Please feel free to contact us at {phone}. Thank you and have a good day.</Say>
@@ -216,20 +218,16 @@ def handle_parent_response():
     # ── Speech received — reset silence counter ───────────────────
     silence_count.pop(call_sid, None)
 
-    # Find which student this call belongs to
     registration = call_sid_map.get(call_sid)
-    # Fallback: if only one call active, use that
     if not registration and hasattr(voice, '_conversations'):
         active = list(voice._conversations.keys())
         if len(active) == 1:
             registration = active[0]
 
-    # Hand off to AI
     if registration and hasattr(voice, 'generate_followup_twiml'):
         twiml = voice.generate_followup_twiml(registration, parent_speech)
         return twiml, 200, {'Content-Type': 'text/xml'}
 
-    # Hard fallback (no registration found)
     return f"""<?xml version="1.0" encoding="UTF-8"?>
 <Response>
     <Say voice="Polly.Aditi" language="en-IN">Thank you. Please contact the college at {phone}. Goodbye.</Say>
