@@ -204,15 +204,18 @@ MEETING SCHEDULING:
   Then on a NEW LINE emit ONLY this control tag (nothing else on that line, no other text):
   [SCHEDULE_MEETING: <day_preference>]
   Where <day_preference> is ONE of:
-    - "tomorrow"      — parent said yes/tomorrow/as soon as possible
-    - "next week"     — parent said next week
-    - "<day name>"    — parent named a specific day, e.g. "Thursday" or "Friday"
+    - "tomorrow"        — parent said yes/tomorrow/as soon as possible
+    - "next week"       — parent said next week
+    - "<day name>"      — parent named a specific day, e.g. "Thursday" or "Friday"
+    - "next_available"  — parent rejected a time but did NOT name a specific new day
+                          (e.g. "can we do a different time?", "I'm busy then", "any other slot?")
 - CRITICAL: The tag must appear on its OWN line. Do NOT embed it inside a sentence.
   WRONG: "Let me check [SCHEDULE_MEETING: thursday] for you."
   RIGHT: "Please wait for a moment, I need to check my schedule.\n[SCHEDULE_MEETING: thursday]"
 - The system intercepts this tag and either:
   (a) Presents ALL available slots for that day and asks the parent to choose (named day), OR
-  (b) Books the nearest slot and confirms it to the parent (tomorrow / next week / yes).
+  (b) Books the nearest slot and confirms it to the parent (tomorrow / next week / yes), OR
+  (c) Finds remaining slots on the same day first, then advances day by day (next_available).
 - After the system responds with the slot options or confirmation, continue naturally.
 - NEVER guess, invent, or hardcode any time. NEVER say "scheduling_meeting" aloud.
 - NEVER write the tag text as spoken words.
@@ -462,6 +465,91 @@ def _resolve_slot(day_pref: str) -> dict | None:
             return slots[0] if slots else None
 
     return sm.get_next_available_slot(prefer_next_week=False)
+
+
+def _resolve_next_available(state: "ConversationState") -> tuple[list[dict], str]:
+    """
+    Find the next batch of free slots to offer after a rejection.
+
+    Search order:
+      1. Remaining slots on the same day as last_booked_slot (excluding the rejected slot).
+      2. If none, advance day by day (skipping Sunday) until free slots are found.
+
+    Returns (slots_with_date, day_name) or ([], "").
+    """
+    from services.schedule_manager import ScheduleManager, _next_weeks_monday
+    from datetime import date, timedelta
+
+    sm = ScheduleManager()
+    today = date.today()
+
+    if state.last_booked_slot:
+        try:
+            start_date = date.fromisoformat(state.last_booked_slot["date"])
+        except (KeyError, ValueError):
+            start_date = today + timedelta(days=1)
+        excluded_time = state.last_booked_slot["start_time"]
+        excluded_day  = state.last_booked_slot["day"].lower()
+    else:
+        start_date    = today + timedelta(days=1)
+        excluded_time = None
+        excluded_day  = None
+
+    for offset in range(8):
+        candidate = start_date + timedelta(days=offset)
+        if candidate <= today:
+            continue
+        if candidate.weekday() == 6:       # skip Sunday
+            continue
+        day_name = candidate.strftime("%A")
+        use_next = candidate >= _next_weeks_monday()
+        slots = sm.get_available_slots_for_day(day_name, next_week=use_next)
+
+        # On the same day as the rejected slot, exclude that exact slot
+        if excluded_day and day_name.lower() == excluded_day and excluded_time:
+            slots = [s for s in slots if s["start_time"] != excluded_time]
+
+        if slots:
+            return [
+                {**s, "date": candidate.isoformat(), "use_next_week": use_next}
+                for s in slots
+            ], day_name
+
+    return [], ""
+
+
+def _try_next_day_slots(after_day: str, after_date: str) -> tuple[list[dict], str]:
+    """
+    Find free slots on the first working day strictly after *after_date*.
+    Used when a parent declines all options on a given day.
+
+    Returns (slots_with_date, day_name) or ([], "").
+    """
+    from services.schedule_manager import ScheduleManager, _next_weeks_monday
+    from datetime import date, timedelta
+
+    sm = ScheduleManager()
+    today = date.today()
+
+    try:
+        start = date.fromisoformat(after_date) + timedelta(days=1)
+    except (ValueError, TypeError):
+        start = today + timedelta(days=1)
+
+    for offset in range(7):
+        candidate = start + timedelta(days=offset)
+        if candidate.weekday() == 6:
+            continue
+        day_name = candidate.strftime("%A")
+        use_next = candidate >= _next_weeks_monday()
+        slots = sm.get_available_slots_for_day(day_name, next_week=use_next)
+        if slots:
+            return [
+                {**s, "date": candidate.isoformat(), "use_next_week": use_next}
+                for s in slots
+            ], day_name
+
+    return [], ""
 
 
 def _resolve_slots_for_day(day_name: str) -> list[dict]:
@@ -755,8 +843,49 @@ class TwoWayAIVoiceService:
                         named_day = d
                         break
 
+            # ── next_available: check same day first, then advance ──
+            if "next_available" in day_pref:
+                # Cancel prior booking — parent is moving to a different slot
+                if state.last_booked_slot:
+                    from services.schedule_manager import ScheduleManager as _SM
+                    _SM().cancel_slot(
+                        state.last_booked_slot["day"],
+                        state.last_booked_slot["start_time"],
+                        next_week=state.last_booked_slot.get("use_next_week", False),
+                    )
+                    state.last_booked_slot = None
+                slots, day_name = _resolve_next_available(state)
+                if slots:
+                    state.pending_slots       = slots
+                    state.awaiting_slot_choice = True
+                    state.stage               = STAGE_SOLUTION
+                    times = ", ".join(_format_time_spoken(s["start_time"]) for s in slots)
+                    spoken = (
+                        f"{pre_schedule_text} "
+                        f"I've checked and on {day_name} we have slots available at {times}. "
+                        f"Which time works best for you?"
+                    ).strip()
+                    logger.info(f"[Scheduler] next_available → {len(slots)} slots on {day_name} for reg={registration}")
+                    return self._twiml(spoken, end_call=False)
+                else:
+                    spoken = (
+                        f"{pre_schedule_text} "
+                        f"I'm afraid we don't have any free slots available over the next few days. "
+                        f"Please call us directly at {self._phone} to arrange a time that suits you."
+                    ).strip()
+                    return self._twiml(spoken, end_call=False)
+
             if named_day:
-                # Bug 2 fix: fetch ALL slots for that day and present options
+                # Cancel any prior booking immediately — parent is switching days
+                if state.last_booked_slot:
+                    from services.schedule_manager import ScheduleManager as _SM
+                    _SM().cancel_slot(
+                        state.last_booked_slot["day"],
+                        state.last_booked_slot["start_time"],
+                        next_week=state.last_booked_slot.get("use_next_week", False),
+                    )
+                    state.last_booked_slot = None
+
                 slots = _resolve_slots_for_day(named_day)
                 if slots:
                     state.pending_slots = slots
@@ -843,30 +972,106 @@ class TwoWayAIVoiceService:
         """
         speech_lower = parent_speech.lower().strip()
 
-        # Check if parent is declining entirely
-        decline_signals = ["no", "none", "different day", "another day", "cancel", "forget it", "never mind"]
-        if any(sig in speech_lower for sig in decline_signals):
-            state.pending_slots = []
+        # ── Day-switch: parent names a different day while in slot-choice flow ──
+        from services.schedule_manager import DAY_INDEX
+        current_day = state.pending_slots[0]["day"].lower() if state.pending_slots else ""
+        requested_day = None
+        for d in DAY_INDEX:
+            if d in speech_lower:
+                requested_day = d
+                break
+
+        if requested_day and requested_day != current_day:
+            # Cancel any currently booked slot and redirect to the requested day
+            if state.last_booked_slot:
+                from services.schedule_manager import ScheduleManager
+                sm = ScheduleManager()
+                sm.cancel_slot(
+                    state.last_booked_slot["day"],
+                    state.last_booked_slot["start_time"],
+                    next_week=state.last_booked_slot.get("use_next_week", False),
+                )
+                state.last_booked_slot = None
+            state.pending_slots        = []
             state.awaiting_slot_choice = False
-            spoken = (
-                "That's completely fine. If you'd like to arrange a meeting at any point, "
-                f"please don't hesitate to call us at {self._phone}. Is there anything else I can help you with?"
-            )
-            state.stage = STAGE_FAREWELL
-            return self._twiml(spoken, end_call=False)
+
+            slots = _resolve_slots_for_day(requested_day)
+            if slots:
+                state.pending_slots        = slots
+                state.awaiting_slot_choice = True
+                state.stage                = STAGE_SOLUTION
+                times = ", ".join(_format_time_spoken(s["start_time"]) for s in slots)
+                spoken = (
+                    f"Of course! On {requested_day.capitalize()} we have slots available at {times}. "
+                    f"Which time works best for you?"
+                )
+                logger.info(f"[Scheduler] Day-switch → {requested_day} for reg={registration}")
+                return self._twiml(spoken, end_call=False)
+            else:
+                spoken = (
+                    f"I'm sorry, we don't have any free slots on {requested_day.capitalize()}. "
+                    f"Would another day work for you?"
+                )
+                return self._twiml(spoken, end_call=False)
+
+        # Check if parent is declining the presented slots
+        decline_signals = ["no", "none", "different day", "another day", "cancel", "forget it", "never mind",
+                           "not available", "can't make", "cannot make", "won't work", "doesn't work"]
+        if any(sig in speech_lower for sig in decline_signals):
+            # Remember which day/date we just rejected so _try_next_day_slots advances past it
+            rejected_day  = state.pending_slots[0]["day"]  if state.pending_slots else ""
+            rejected_date = state.pending_slots[0].get("date", "") if state.pending_slots else ""
+            state.pending_slots        = []
+            state.awaiting_slot_choice = False
+
+            # Automatically try the next working day
+            next_slots, next_day = _try_next_day_slots(rejected_day, rejected_date)
+            if next_slots:
+                state.pending_slots        = next_slots
+                state.awaiting_slot_choice = True
+                state.stage                = STAGE_SOLUTION
+                times = ", ".join(_format_time_spoken(s["start_time"]) for s in next_slots)
+                spoken = (
+                    f"No problem. I've checked and on {next_day} we have slots available at {times}. "
+                    f"Would any of those work for you?"
+                )
+                logger.info(f"[Scheduler] Declined {rejected_day} → offering {next_day} for reg={registration}")
+                return self._twiml(spoken, end_call=False)
+            else:
+                state.stage = STAGE_FAREWELL
+                spoken = (
+                    f"I completely understand. Unfortunately we don't have any free slots available "
+                    f"over the next few days. Please call us at {self._phone} and we'll do our best "
+                    f"to find a time that works for you."
+                )
+                return self._twiml(spoken, end_call=False)
 
         # Try to find a time match in parent's speech
         matched_slot = None
         for slot in state.pending_slots:
-            # Match e.g. "10:30", "ten thirty", "half past ten", etc.
-            if slot["start_time"].replace(":", "") in speech_lower.replace(":", ""):
+            st = slot["start_time"]
+            # 24-hour digit match: "1345" in "1345 would be best"
+            if st.replace(":", "") in speech_lower.replace(":", ""):
                 matched_slot = slot
                 break
-            # Also match just the hour portion
-            hour = slot["start_time"].split(":")[0].lstrip("0") or "0"
-            if f" {hour} " in f" {speech_lower} " or speech_lower.startswith(hour):
+            # 12-hour spoken form: "1:45 pm" or "1:45pm" for slot "13:45"
+            spoken_fmt = _format_time_spoken(st).lower()          # e.g. "1:45 pm"
+            spoken_nsp = spoken_fmt.replace(" ", "")              # "1:45pm"
+            speech_nsp = speech_lower.replace(" ", "")
+            if spoken_fmt in speech_lower or spoken_nsp in speech_nsp:
                 matched_slot = slot
                 break
+            # Hour-only 24h match: " 13 " for "13:45"
+            hour24 = st.split(":")[0].lstrip("0") or "0"
+            if f" {hour24} " in f" {speech_lower} " or speech_lower.startswith(hour24):
+                matched_slot = slot
+                break
+            # Hour-only 12h match: " 1 " for "1:45 PM"
+            hour12 = spoken_fmt.split(":")[0].split(" ")[0]       # "1" or "3"
+            if hour12 != hour24:
+                if f" {hour12} " in f" {speech_lower} " or speech_lower.startswith(hour12 + " ") or speech_lower.startswith(hour12 + ":"):
+                    matched_slot = slot
+                    break
 
         if matched_slot:
             from services.schedule_manager import ScheduleManager

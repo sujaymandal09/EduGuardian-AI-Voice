@@ -226,8 +226,17 @@ def handle_parent_response():
             registration = active[0]
 
     if registration and hasattr(voice, 'generate_followup_twiml'):
-        twiml = voice.generate_followup_twiml(registration, parent_speech)
-        return twiml, 200, {'Content-Type': 'text/xml'}
+        try:
+            twiml = voice.generate_followup_twiml(registration, parent_speech)
+            return twiml, 200, {'Content-Type': 'text/xml'}
+        except Exception:
+            import traceback
+            print(f"\n[ERROR] generate_followup_twiml crashed for reg={registration}:")
+            traceback.print_exc()
+            return f"""<?xml version="1.0" encoding="UTF-8"?>
+<Response>
+    <Say voice="Polly.Aditi" language="en-IN">I'm sorry, there's a technical issue on our end. Please call us at {phone}. Goodbye.</Say>
+</Response>""", 200, {'Content-Type': 'text/xml'}
 
     return f"""<?xml version="1.0" encoding="UTF-8"?>
 <Response>
