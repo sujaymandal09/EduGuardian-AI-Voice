@@ -1,11 +1,12 @@
 """
 services/twilio_groq_voice.py
 ──────────────────────────────
-2-Way AI Voice — Groq (llama-3.3-70b) + Twilio
+2-Way AI Voice — Groq (llama-3.1-8b-instant) + Twilio
 """
 import html
 import logging
 import os
+import re
 import time
 from groq import Groq
 from core.models import CallPayload, NotificationResult
@@ -14,25 +15,18 @@ logger = logging.getLogger(__name__)
 
 
 # ─────────────────────────────────────────────────────────────────
-#  CALL STAGES  — tracked so closing signals mean different things
-#  at different points in the conversation
+#  CALL STAGES
 # ─────────────────────────────────────────────────────────────────
-STAGE_INTRO        = "intro"         # Just confirmed who they are
-STAGE_AVAILABILITY = "availability"  # Asked if free — waiting for answer
-STAGE_CONVERSATION = "conversation"  # Main discussion happening
-STAGE_SOLUTION     = "solution"      # Advice / meeting suggested
-STAGE_FAREWELL     = "farewell"      # Asked "anything else?" — waiting for final answer
-STAGE_CLOSING      = "closing"       # Wrapping up
+STAGE_INTRO        = "intro"
+STAGE_AVAILABILITY = "availability"
+STAGE_CONVERSATION = "conversation"
+STAGE_SOLUTION     = "solution"
+STAGE_FAREWELL     = "farewell"
+STAGE_CLOSING      = "closing"
 
 
 # ─────────────────────────────────────────────────────────────────
 #  CLOSING SIGNAL DETECTOR
-#  Only triggers AFTER the conversation has actually happened
-#  (stage = solution or closing). Early "okay" and "yes" should
-#  never end the call — they are just acknowledgements.
-#
-#  NOTE: Hindi/mixed phrases are kept here intentionally —
-#  they detect what the PARENT says, not what the AI speaks.
 # ─────────────────────────────────────────────────────────────────
 DEFINITE_CLOSING = [
     "thank you", "thanks", "thank you so much", "thanks so much",
@@ -55,8 +49,6 @@ DEFINITE_CLOSING = [
     "noted", "will do",
 ]
 
-# These only mean "end call" AFTER a solution/meeting has been proposed
-# In early stages they just mean "I'm listening, go on"
 LATE_STAGE_CLOSING = [
     "okay", "ok", "alright", "sure", "of course",
     "yes", "yeah", "yep", "yup",
@@ -66,16 +58,11 @@ LATE_STAGE_CLOSING = [
 
 def _parent_wants_to_end(speech: str, stage: str) -> bool:
     text = speech.lower().strip()
-
-    # Definite closing phrases work at any stage
     if any(sig in text for sig in DEFINITE_CLOSING):
         return True
-
-    # Short affirmatives only close the call AFTER solution has been given
     if stage in (STAGE_SOLUTION, STAGE_FAREWELL, STAGE_CLOSING):
         if text in LATE_STAGE_CLOSING:
             return True
-
     return False
 
 
@@ -201,6 +188,21 @@ MEETING RULES (LOW risk):
 """,
     }.get(risk_level.upper(), "Suggest meeting if helpful. Accept whatever time parent proposes.")
 
+    scheduling_section = """
+MEETING SCHEDULING:
+- When a parent agrees to a meeting, DO NOT suggest any specific time yourself.
+- Instead, say: "Please wait for a moment. I need to check my schedule." then on a NEW LINE
+  emit ONLY this tag (nothing else on that line):
+  [SCHEDULE_MEETING: <day_preference>]
+  Where <day_preference> is one of:
+    - "tomorrow"      — parent said yes/tomorrow/soonest
+    - "next week"     — parent said next week
+    - "<day name>"    — parent named a specific day, e.g. "Thursday"
+- The system will replace this tag with the real available slot and inject it into your reply.
+- After the system injects the slot, confirm it warmly and move to farewell.
+- NEVER guess or invent a time. NEVER hardcode a time. ALWAYS emit the tag first.
+"""
+
     return f"""You are Priya — a warm, experienced school counselor calling from {school}.
 You are speaking with {parent_name}, parent of {student_name}.
 School phone: {phone}
@@ -240,6 +242,8 @@ they are busy before you start discussing sensitive matters.
 
 {meeting_rules}
 
+{scheduling_section}
+
 INTERRUPTION HANDLING:
 - If parent speaks mid-reply — respond only to what they said.
 - Drop what you were saying. React to their words directly.
@@ -276,7 +280,8 @@ STRICT RULES:
 7. End EVERY reply with one control tag on its own line:
    [CONTINUE]  — keep going
    [END_CALL]  — end now (only after farewell step 2 is complete)
-8. Tag is for system only — never spoken aloud.
+   [SCHEDULE_MEETING: <day_preference>]  — only when scheduling a meeting
+8. Tags are for system only — never spoken aloud.
 
 You are in a REAL phone call. React naturally. Be human. Speak English only.
 """.strip()
@@ -292,8 +297,9 @@ class ConversationState:
         self.phone          = phone
         self.ended          = False
         self.turn_count     = 0
-        self.stage          = STAGE_INTRO    # starts at intro
+        self.stage          = STAGE_INTRO
         self.messages: list[dict] = []
+        self.meeting_pending: bool = False   # True while awaiting slot injection
         self.system_prompt  = _build_counselor_prompt(
             school=school,
             phone=phone,
@@ -306,8 +312,6 @@ class ConversationState:
         )
 
     def advance_stage(self):
-        """Move stage forward based on turn count as a rough heuristic."""
-        # STAGE_FAREWELL and STAGE_CLOSING are set explicitly — never overwrite them here
         if self.stage in (STAGE_FAREWELL, STAGE_CLOSING):
             return
         if self.stage == STAGE_INTRO and self.turn_count >= 1:
@@ -316,6 +320,62 @@ class ConversationState:
             self.stage = STAGE_CONVERSATION
         elif self.stage == STAGE_CONVERSATION and self.turn_count >= 5:
             self.stage = STAGE_SOLUTION
+
+
+# ─────────────────────────────────────────────────────────────────
+#  SCHEDULE TAG PARSER
+# ─────────────────────────────────────────────────────────────────
+_SCHEDULE_TAG_RE = re.compile(
+    r'\[SCHEDULE_MEETING:\s*([^\]]+)\]', re.IGNORECASE
+)
+
+def _extract_schedule_tag(ai_text: str) -> tuple[str, str | None]:
+    """
+    Returns (cleaned_text, day_preference | None).
+    cleaned_text has the tag removed; day_preference is the raw preference string.
+    """
+    match = _SCHEDULE_TAG_RE.search(ai_text)
+    if not match:
+        return ai_text, None
+    day_pref = match.group(1).strip().lower()
+    cleaned = _SCHEDULE_TAG_RE.sub("", ai_text).strip()
+    return cleaned, day_pref
+
+
+def _resolve_slot(day_pref: str) -> dict | None:
+    """
+    Use ScheduleManager to resolve a day preference to a concrete slot.
+    Imported here (lazy) so it is never loaded during normal call flow.
+    """
+    from services.schedule_manager import ScheduleManager, DAY_INDEX
+    sm = ScheduleManager()
+
+    # "next week" preference
+    if "next week" in day_pref:
+        slot = sm.get_next_available_slot(prefer_next_week=True)
+        return slot
+
+    # Named day (e.g. "thursday")
+    for day_name in DAY_INDEX:
+        if day_name in day_pref:
+            # Determine whether to look at current or next week
+            from datetime import date, timedelta
+            today = date.today()
+            target_weekday = DAY_INDEX[day_name]
+            days_ahead = (target_weekday - today.weekday()) % 7
+            if days_ahead == 0:
+                days_ahead = 7  # same day → next occurrence
+            target_date = today + timedelta(days=days_ahead)
+            from services.schedule_manager import _next_weeks_monday
+            use_next = target_date >= _next_weeks_monday()
+            slots = sm.get_available_slots_for_day(day_name.capitalize(), next_week=use_next)
+            if slots:
+                return {**slots[0], "date": target_date.isoformat()}
+            return None  # named day requested but fully booked
+
+    # "tomorrow" or generic "yes"
+    slot = sm.get_next_available_slot(prefer_next_week=False)
+    return slot
 
 
 # ─────────────────────────────────────────────────────────────────
@@ -345,7 +405,6 @@ class TwoWayAIVoiceService:
         if self._ai_ready:
             self._groq = Groq(api_key=self._groq_key)
             print(f"[OK] Groq Connected  [{self.MODEL}]")
-            # Pre-warm the API to reduce cold-start latency on first call
             try:
                 self._groq.chat.completions.create(
                     model=self.MODEL,
@@ -353,10 +412,10 @@ class TwoWayAIVoiceService:
                     max_tokens=10,
                 )
                 print("[OK] Groq Pre-warmed")
-            except Exception as e:
-                pass  # Warmup is optional
+            except Exception:
+                pass
         else:
-            print("[WARN]  GROQ_API_KEY not set — Demo mode active")
+            print("[WARN] GROQ_API_KEY not set — Demo mode active")
 
         self._conversations: dict[str, ConversationState] = {}
         self.calls_made = []
@@ -368,7 +427,6 @@ class TwoWayAIVoiceService:
         state.advance_stage()
 
         try:
-            # Cap message history to last 12 messages to limit input tokens
             recent = state.messages[-self.MAX_HISTORY:]
             response = self._groq.chat.completions.create(
                 model=self.MODEL,
@@ -389,7 +447,7 @@ class TwoWayAIVoiceService:
         state.messages.append({"role": "assistant", "content": ai_text})
         return ai_text
 
-    # ── Parse control tag ─────────────────────────────────────────
+    # ── Parse control tags ────────────────────────────────────────
     def _parse_reply(self, ai_text: str) -> tuple[str, bool]:
         end_call = "[END_CALL]" in ai_text
         spoken = (ai_text
@@ -398,7 +456,7 @@ class TwoWayAIVoiceService:
                   .strip())
         return spoken, end_call
 
-    # ── Build TwiML — Say inside Gather for interruptibility ──────
+    # ── Build TwiML ───────────────────────────────────────────────
     def _twiml(self, spoken: str, end_call: bool) -> str:
         safe    = html.escape(spoken)
         safe_ph = html.escape(self._phone)
@@ -425,11 +483,9 @@ class TwoWayAIVoiceService:
 
     # ── Opening TwiML ─────────────────────────────────────────────
     def _opening_twiml(self, payload: CallPayload) -> str:
-        safe_parent  = html.escape(payload.parent_name)
-        safe_student = html.escape(payload.student_name)
-        safe_school  = html.escape(self._school)
-        safe_phone   = html.escape(self._phone)
-        webhook      = f"{self._ngrok_url}/handle-parent-response"
+        safe_parent = html.escape(payload.parent_name)
+        safe_phone  = html.escape(self._phone)
+        webhook     = f"{self._ngrok_url}/handle-parent-response"
 
         return f"""<?xml version="1.0" encoding="UTF-8"?>
 <Response>
@@ -470,32 +526,72 @@ class TwoWayAIVoiceService:
         if _parent_wants_to_end(parent_speech, state.stage):
             if state.turn_count >= 4:
                 if state.stage == STAGE_FAREWELL:
-                    # Parent confirmed nothing more — give final goodbye with working hours
                     speech_for_ai = (
                         parent_speech +
                         " [SYSTEM: end call now - mention school hours and phone number]"
                     )
                 else:
-                    # First closing signal — move to farewell, ask if anything else
                     state.stage = STAGE_FAREWELL
                     speech_for_ai = (
                         parent_speech +
                         " [SYSTEM: ask about more questions]"
                     )
             else:
-                # Too early — treat as normal reply, don't close
                 speech_for_ai = parent_speech
         else:
             speech_for_ai = parent_speech
 
         ai_text = self._ask_groq(state, speech_for_ai)
+
+        # ── Schedule meeting tag detection ────────────────────────
+        pre_schedule_text, day_pref = _extract_schedule_tag(ai_text)
+
+        if day_pref is not None:
+            # Parent agreed to a meeting — resolve a real slot
+            slot = _resolve_slot(day_pref)
+
+            if slot:
+                # Book the slot immediately
+                from services.schedule_manager import ScheduleManager
+                sm = ScheduleManager()
+                sm.book_slot(slot["day"], slot["start_time"], next_week=slot.get("use_next_week", False))
+
+                slot_str = f"{slot['day']} at {slot['start_time']}"
+                logger.info(f"[Scheduler] Booked: {slot_str} for reg={registration}")
+
+                # Inject confirmed slot into Priya's reply
+                if pre_schedule_text:
+                    spoken = (
+                        f"{pre_schedule_text} "
+                        f"I've checked and we have a slot available on {slot_str}. "
+                        f"Does that work for you?"
+                    )
+                else:
+                    spoken = (
+                        f"I've checked my schedule and we have a slot available on {slot_str}. "
+                        f"Does that work for you?"
+                    )
+                # Mark stage as solution since a meeting was proposed
+                state.stage = STAGE_SOLUTION
+                return self._twiml(spoken, end_call=False)
+
+            else:
+                # No slots available — tell the parent
+                spoken = (
+                    f"{pre_schedule_text} "
+                    f"I'm afraid we don't have any free slots available in the next few days. "
+                    f"Please call us directly at {self._phone} to arrange a time that suits you."
+                ).strip()
+                return self._twiml(spoken, end_call=False)
+
+        # ── Normal flow ───────────────────────────────────────────
         spoken, end_call = self._parse_reply(ai_text)
 
         if end_call:
             state.ended = True
 
         print(f"  [P] Parent : \"{parent_speech}\"")
-        print(f"  [AI] Priya  : \"{spoken[:90]}...\"")
+        print(f"  [AI] Priya  : \"{spoken[:90]}{'...' if len(spoken) > 90 else ''}\"")
         print(f"  [INFO] Turn: {state.turn_count} | Stage: {state.stage} | End: {end_call}")
 
         return self._twiml(spoken, end_call)
