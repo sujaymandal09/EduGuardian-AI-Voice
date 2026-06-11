@@ -3,7 +3,7 @@ app.py - EduGuardian with Groq 2-Way AI Voice
 """
 import csv
 import os
-from flask import Flask, render_template, request, redirect, url_for, flash
+from flask import Flask, render_template, request, redirect, url_for, flash, jsonify
 from dotenv import load_dotenv
 from core.models import StudentRecord, CallPayload
 from agents.attendance_agent import AttendanceAgent
@@ -17,21 +17,25 @@ app.secret_key = os.getenv("SECRET_KEY", "attendance-guardian-secret")
 
 voice_service = None
 last_results = {}
-call_sid_map = {}       # maps Twilio CallSid → student registration
-silence_count = {}      # maps Twilio CallSid → number of consecutive no-speech events
+call_sid_map = {}
+silence_count = {}
 
 os.makedirs('data', exist_ok=True)
 CSV_PATH = os.path.join('data', 'students.csv')
 
-# ── Sync schedule from Weekly_Schedule.csv, then roll over week ───
+# ── Initialise SQLite database ─────────────────────────────────
+from services.database import init_db, get_all_summaries, delete_summary
+init_db()
+# ──────────────────────────────────────────────────────────────
+
+# ── Sync schedule from Weekly_Schedule.csv, then roll over week ──
 from services.schedule_manager import ScheduleManager, sync_from_weekly_csv
 sync_from_weekly_csv()
 ScheduleManager().reset_week_if_needed()
-# ─────────────────────────────────────────────────────────────────
+# ──────────────────────────────────────────────────────────────
 
 
 def get_voice_service():
-    """Pick the right service based on available API keys."""
     global voice_service
     if voice_service is None:
         twilio_ready = bool(os.getenv("TWILIO_ACCOUNT_SID"))
@@ -178,7 +182,6 @@ def call_selective():
 
 @app.route('/handle-parent-response', methods=['GET', 'POST'])
 def handle_parent_response():
-    """Twilio webhook — receives parent speech, returns next AI reply as TwiML."""
     parent_speech = request.form.get('SpeechResult', '').strip()
     call_sid      = request.form.get('CallSid', '')
 
@@ -189,7 +192,6 @@ def handle_parent_response():
     ngrok  = os.getenv('NGROK_URL', '')
     phone  = os.getenv('SCHOOL_PHONE', '033-4805-1910')
 
-    # ── No speech detected ────────────────────────────────────────
     if not parent_speech:
         count = silence_count.get(call_sid, 0) + 1
         silence_count[call_sid] = count
@@ -216,7 +218,6 @@ def handle_parent_response():
     <Say voice="Polly.Aditi" language="en-IN">I couldn't clearly hear the response, so I will conclude here for now. Please feel free to contact us at {phone}. Thank you and have a good day.</Say>
 </Response>""", 200, {'Content-Type': 'text/xml'}
 
-    # ── Speech received — reset silence counter ───────────────────
     silence_count.pop(call_sid, None)
 
     registration = call_sid_map.get(call_sid)
@@ -242,6 +243,35 @@ def handle_parent_response():
 <Response>
     <Say voice="Polly.Aditi" language="en-IN">Thank you. Please contact the college at {phone}. Goodbye.</Say>
 </Response>""", 200, {'Content-Type': 'text/xml'}
+
+
+# ── Summaries Dashboard ────────────────────────────────────────
+
+@app.route('/summaries')
+def summaries():
+    """Teacher dashboard — shows all AI-generated call summaries."""
+    all_summaries = get_all_summaries()
+
+    total      = len(all_summaries)
+    meetings   = sum(1 for s in all_summaries if s.get('meeting_booked'))
+    high_risk  = sum(1 for s in all_summaries if s.get('risk_level') == 'HIGH')
+    medium_risk= sum(1 for s in all_summaries if s.get('risk_level') == 'MEDIUM')
+
+    return render_template('dashboard.html',
+                           summaries=all_summaries,
+                           total=total,
+                           meetings=meetings,
+                           high_risk=high_risk,
+                           medium_risk=medium_risk)
+
+
+@app.route('/summaries/delete/<call_id>', methods=['POST'])
+def delete_summary_route(call_id):
+    """Delete a single call summary + its transcript. Returns JSON."""
+    success = delete_summary(call_id)
+    return jsonify({"success": success})
+
+# ──────────────────────────────────────────────────────────────
 
 
 @app.route('/upload', methods=['GET', 'POST'])
