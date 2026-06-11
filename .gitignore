@@ -26,3 +26,4 @@ ngrok.exe
 
 # Runtime-generated schedule state (rebuilt from Weekly_Schedule.csv on startup)
 data/meeting_slots.csv
+data/eduguardian.db
