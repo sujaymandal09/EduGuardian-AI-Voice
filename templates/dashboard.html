@@ -1,0 +1,642 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Call Summaries — EduGuardian</title>
+    <style>
+        /* ── Reset & Base ───────────────────────── */
+        *,
+        *::before,
+        *::after {
+            box-sizing: border-box;
+            margin: 0;
+            padding: 0;
+        }
+
+        :root {
+            --ink: #1a1f2e;
+            --ink-soft: #4a5168;
+            --ink-muted: #8892a4;
+            --surface: #f5f6fa;
+            --card: #ffffff;
+            --border: #e2e6ef;
+            --accent: #3d5afe;
+            --accent-dim: #e8ecff;
+            --high: #e53935;
+            --high-dim: #ffebee;
+            --med: #f57c00;
+            --med-dim: #fff3e0;
+            --low: #2e7d32;
+            --low-dim: #e8f5e9;
+            --met: #00897b;
+            --met-dim: #e0f2f1;
+            --att: #1565c0;
+            --att-dim: #e3f2fd;
+            --perf: #6a1b9a;
+            --perf-dim: #f3e5f5;
+            --beh: #c62828;
+            --beh-dim: #ffebee;
+            --radius: 10px;
+            --shadow: 0 2px 12px rgba(0, 0, 0, .07);
+        }
+
+        body {
+            font-family: 'Segoe UI', system-ui, sans-serif;
+            background: var(--surface);
+            color: var(--ink);
+            min-height: 100vh;
+        }
+
+        /* ── Top bar ────────────────────────────── */
+        .topbar {
+            background: var(--ink);
+            color: #fff;
+            padding: 0 32px;
+            height: 60px;
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+        }
+
+        .topbar-brand {
+            font-size: 1.05rem;
+            font-weight: 700;
+            letter-spacing: .5px;
+        }
+
+        .topbar-brand span {
+            color: #7986ff;
+        }
+
+        .topbar-back {
+            font-size: .85rem;
+            color: #aab;
+            text-decoration: none;
+            transition: color .2s;
+        }
+
+        .topbar-back:hover {
+            color: #fff;
+        }
+
+        /* ── Page wrapper ───────────────────────── */
+        .page {
+            max-width: 1080px;
+            margin: 0 auto;
+            padding: 32px 24px 60px;
+        }
+
+        /* ── Page heading ───────────────────────── */
+        .page-head {
+            display: flex;
+            align-items: flex-end;
+            justify-content: space-between;
+            flex-wrap: wrap;
+            gap: 16px;
+            margin-bottom: 28px;
+        }
+
+        .page-head h1 {
+            font-size: 1.6rem;
+            font-weight: 700;
+            color: var(--ink);
+        }
+
+        .page-head p {
+            font-size: .9rem;
+            color: var(--ink-muted);
+            margin-top: 4px;
+        }
+
+        /* ── Stat strip ─────────────────────────── */
+        .stat-strip {
+            display: grid;
+            grid-template-columns: repeat(4, 1fr);
+            gap: 14px;
+            margin-bottom: 28px;
+        }
+
+        .stat {
+            background: var(--card);
+            border: 1px solid var(--border);
+            border-radius: var(--radius);
+            padding: 18px 20px;
+            box-shadow: var(--shadow);
+        }
+
+        .stat-num {
+            font-size: 2rem;
+            font-weight: 800;
+            line-height: 1;
+            color: var(--ink);
+        }
+
+        .stat-num.blue {
+            color: var(--accent);
+        }
+
+        .stat-num.red {
+            color: var(--high);
+        }
+
+        .stat-num.amber {
+            color: var(--med);
+        }
+
+        .stat-num.teal {
+            color: var(--met);
+        }
+
+        .stat-label {
+            font-size: .8rem;
+            color: var(--ink-muted);
+            margin-top: 6px;
+            font-weight: 500;
+            letter-spacing: .3px;
+            text-transform: uppercase;
+        }
+
+        /* ── Filter bar ─────────────────────────── */
+        .filter-bar {
+            display: flex;
+            gap: 8px;
+            flex-wrap: wrap;
+            margin-bottom: 20px;
+        }
+
+        .filter-btn {
+            padding: 6px 16px;
+            border-radius: 20px;
+            border: 1.5px solid var(--border);
+            background: var(--card);
+            color: var(--ink-soft);
+            font-size: .82rem;
+            font-weight: 600;
+            cursor: pointer;
+            transition: all .18s;
+        }
+
+        .filter-btn:hover,
+        .filter-btn.active {
+            background: var(--accent);
+            border-color: var(--accent);
+            color: #fff;
+        }
+
+        /* ── Cards grid ─────────────────────────── */
+        .cards {
+            display: grid;
+            gap: 16px;
+        }
+
+        .card {
+            background: var(--card);
+            border: 1px solid var(--border);
+            border-radius: var(--radius);
+            box-shadow: var(--shadow);
+            overflow: hidden;
+            transition: box-shadow .2s;
+        }
+
+        .card:hover {
+            box-shadow: 0 4px 20px rgba(0, 0, 0, .11);
+        }
+
+        .card-head {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            padding: 16px 20px 12px;
+            border-bottom: 1px solid var(--border);
+            flex-wrap: wrap;
+            gap: 10px;
+        }
+
+        .card-left {
+            display: flex;
+            align-items: center;
+            gap: 14px;
+        }
+
+        .avatar {
+            width: 42px;
+            height: 42px;
+            border-radius: 50%;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 1rem;
+            font-weight: 800;
+            flex-shrink: 0;
+        }
+
+        .card-name {
+            font-size: 1rem;
+            font-weight: 700;
+        }
+
+        .card-sub {
+            font-size: .8rem;
+            color: var(--ink-muted);
+            margin-top: 2px;
+        }
+
+        .card-badges {
+            display: flex;
+            gap: 7px;
+            align-items: center;
+            flex-wrap: wrap;
+        }
+
+        .badge {
+            display: inline-block;
+            padding: 3px 10px;
+            border-radius: 20px;
+            font-size: .75rem;
+            font-weight: 700;
+            letter-spacing: .3px;
+            text-transform: uppercase;
+        }
+
+        /* Risk badges */
+        .badge-HIGH {
+            background: var(--high-dim);
+            color: var(--high);
+        }
+
+        .badge-MEDIUM {
+            background: var(--med-dim);
+            color: var(--med);
+        }
+
+        .badge-LOW {
+            background: var(--low-dim);
+            color: var(--low);
+        }
+
+        /* Category badges */
+        .badge-attendance {
+            background: var(--att-dim);
+            color: var(--att);
+        }
+
+        .badge-performance {
+            background: var(--perf-dim);
+            color: var(--perf);
+        }
+
+        .badge-behavior,
+        .badge-behaviour {
+            background: var(--beh-dim);
+            color: var(--beh);
+        }
+
+        /* Meeting badge */
+        .badge-meeting {
+            background: var(--met-dim);
+            color: var(--met);
+        }
+
+        /* ── Card body ──────────────────────────── */
+        .card-body {
+            padding: 16px 20px;
+        }
+
+        .summary-text {
+            font-size: .9rem;
+            line-height: 1.65;
+            color: var(--ink-soft);
+        }
+
+        /* ── Card footer ────────────────────────── */
+        .card-footer {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            padding: 12px 20px;
+            border-top: 1px solid var(--border);
+            background: #fafbfd;
+            flex-wrap: wrap;
+            gap: 8px;
+        }
+
+        .card-date {
+            font-size: .78rem;
+            color: var(--ink-muted);
+            display: flex;
+            align-items: center;
+            gap: 5px;
+        }
+
+        .meeting-info {
+            font-size: .8rem;
+            font-weight: 600;
+            color: var(--met);
+            display: flex;
+            align-items: center;
+            gap: 5px;
+        }
+
+        .no-meeting {
+            font-size: .78rem;
+            color: var(--ink-muted);
+        }
+
+        .btn-delete {
+            padding: 5px 14px;
+            border-radius: 6px;
+            border: 1.5px solid #ffcdd2;
+            background: #fff;
+            color: var(--high);
+            font-size: .78rem;
+            font-weight: 600;
+            cursor: pointer;
+            transition: all .18s;
+        }
+
+        .btn-delete:hover {
+            background: var(--high);
+            border-color: var(--high);
+            color: #fff;
+        }
+
+        /* ── Empty state ────────────────────────── */
+        .empty {
+            text-align: center;
+            padding: 72px 20px;
+            color: var(--ink-muted);
+        }
+
+        .empty-icon {
+            font-size: 3.5rem;
+            margin-bottom: 16px;
+        }
+
+        .empty h2 {
+            font-size: 1.2rem;
+            color: var(--ink-soft);
+            margin-bottom: 8px;
+        }
+
+        .empty p {
+            font-size: .9rem;
+        }
+
+        /* ── Toast ──────────────────────────────── */
+        .toast {
+            position: fixed;
+            bottom: 24px;
+            right: 24px;
+            background: var(--ink);
+            color: #fff;
+            padding: 12px 20px;
+            border-radius: 8px;
+            font-size: .87rem;
+            font-weight: 500;
+            box-shadow: 0 4px 20px rgba(0, 0, 0, .2);
+            transform: translateY(80px);
+            opacity: 0;
+            transition: all .3s ease;
+            z-index: 1000;
+        }
+
+        .toast.show {
+            transform: translateY(0);
+            opacity: 1;
+        }
+
+        .toast.error {
+            background: var(--high);
+        }
+
+        /* ── Responsive ─────────────────────────── */
+        @media (max-width: 680px) {
+            .stat-strip {
+                grid-template-columns: repeat(2, 1fr);
+            }
+
+            .topbar {
+                padding: 0 16px;
+            }
+
+            .page {
+                padding: 20px 14px 48px;
+            }
+        }
+    </style>
+</head>
+
+<body>
+
+    <div class="topbar">
+        <div class="topbar-brand">Edu<span>Guardian</span></div>
+        <a href="/" class="topbar-back">← Back to Dashboard</a>
+    </div>
+
+    <div class="page">
+
+        <!-- Heading -->
+        <div class="page-head">
+            <div>
+                <h1>📋 Call Summaries</h1>
+                <p>AI-generated summaries of every parent call. Newest first.</p>
+            </div>
+        </div>
+
+        <!-- Stats -->
+        <div class="stat-strip">
+            <div class="stat">
+                <div class="stat-num blue">{{ total }}</div>
+                <div class="stat-label">Total Calls</div>
+            </div>
+            <div class="stat">
+                <div class="stat-num red">{{ high_risk }}</div>
+                <div class="stat-label">High Risk</div>
+            </div>
+            <div class="stat">
+                <div class="stat-num amber">{{ medium_risk }}</div>
+                <div class="stat-label">Medium Risk</div>
+            </div>
+            <div class="stat">
+                <div class="stat-num teal">{{ meetings }}</div>
+                <div class="stat-label">Meetings Booked</div>
+            </div>
+        </div>
+
+        <!-- Filter bar -->
+        <div class="filter-bar">
+            <button class="filter-btn active" onclick="filter('all', this)">All</button>
+            <button class="filter-btn" onclick="filter('attendance', this)">Attendance</button>
+            <button class="filter-btn" onclick="filter('performance', this)">Performance</button>
+            <button class="filter-btn" onclick="filter('behavior', this)">Behaviour</button>
+            <button class="filter-btn" onclick="filter('HIGH', this)">High Risk</button>
+            <button class="filter-btn" onclick="filter('MEDIUM', this)">Medium Risk</button>
+        </div>
+
+        <!-- Cards -->
+        {% if summaries %}
+        <div class="cards" id="cards-container">
+            {% for s in summaries %}
+            {% set dim = s.dimension | lower %}
+            {% set reg_short = s.registration.split('-')[-1] if '-' in s.registration else s.registration %}
+
+            <!-- colour per category -->
+            {% if dim == 'attendance' %}
+            {% set avatar_bg = '#e3f2fd' %}
+            {% set avatar_fg = '#1565c0' %}
+            {% elif dim == 'performance' %}
+            {% set avatar_bg = '#f3e5f5' %}
+            {% set avatar_fg = '#6a1b9a' %}
+            {% else %}
+            {% set avatar_bg = '#ffebee' %}
+            {% set avatar_fg = '#c62828' %}
+            {% endif %}
+
+            <div class="card" data-dimension="{{ dim }}" data-risk="{{ s.risk_level }}" data-id="{{ s.id }}">
+
+                <!-- Head -->
+                <div class="card-head">
+                    <div class="card-left">
+                        <div class="avatar" style="background:{{ avatar_bg }}; color:{{ avatar_fg }};">
+                            {{ s.student_name[0] }}
+                        </div>
+                        <div>
+                            <div class="card-name">{{ s.student_name }}</div>
+                            <div class="card-sub">
+                                Reg: {{ s.registration }} &nbsp;·&nbsp;
+                                Parent: {{ s.parent_name }}
+                            </div>
+                        </div>
+                    </div>
+                    <div class="card-badges">
+                        <span class="badge badge-{{ s.risk_level }}">{{ s.risk_level }}</span>
+                        <span class="badge badge-{{ dim }}">{{ dim | capitalize }}</span>
+                    </div>
+                </div>
+
+                <!-- Body -->
+                <div class="card-body">
+                    <p class="summary-text">{{ s.summary }}</p>
+                </div>
+
+                <!-- Footer -->
+                <div class="card-footer">
+                    <span class="card-date">
+                        🕐
+                        {% set raw = s.call_date %}
+                        {% if 'T' in raw %}
+                        {{ raw[:10] }} at {{ raw[11:16] }}
+                        {% else %}
+                        {{ raw }}
+                        {% endif %}
+                    </span>
+
+                    {% if s.meeting_booked %}
+                    <span class="meeting-info">📅 Meeting: {{ s.meeting_booked }}</span>
+                    {% else %}
+                    <span class="no-meeting">No meeting scheduled</span>
+                    {% endif %}
+
+                    <button class="btn-delete" onclick="deleteSummary({{ s.id }}, this)">
+                        Delete
+                    </button>
+                </div>
+
+            </div>
+            {% endfor %}
+        </div>
+
+        {% else %}
+        <div class="empty">
+            <div class="empty-icon">📭</div>
+            <h2>No call summaries yet</h2>
+            <p>Summaries appear here automatically after each AI parent call ends.</p>
+        </div>
+        {% endif %}
+
+    </div>
+
+    <!-- Toast -->
+    <div class="toast" id="toast"></div>
+
+    <script>
+        // ── Filter ────────────────────────────────────
+        function filter(value, btn) {
+            document.querySelectorAll('.filter-btn').forEach(b => b.classList.remove('active'));
+            btn.classList.add('active');
+
+            document.querySelectorAll('.card').forEach(card => {
+                if (value === 'all') {
+                    card.style.display = '';
+                } else if (['HIGH', 'MEDIUM', 'LOW'].includes(value)) {
+                    card.style.display = card.dataset.risk === value ? '' : 'none';
+                } else {
+                    card.style.display = card.dataset.dimension === value ? '' : 'none';
+                }
+            });
+        }
+
+        // ── Delete ────────────────────────────────────
+        function deleteSummary(id, btn) {
+            if (!confirm('Delete this call summary? This cannot be undone.')) return;
+
+            btn.disabled = true;
+            btn.textContent = 'Deleting…';
+
+            fetch(`/summaries/delete/${id}`, { method: 'POST' })
+                .then(r => r.json())
+                .then(data => {
+                    if (data.success) {
+                        const card = btn.closest('.card');
+                        card.style.transition = 'opacity .3s, transform .3s';
+                        card.style.opacity = '0';
+                        card.style.transform = 'translateX(30px)';
+                        setTimeout(() => {
+                            card.remove();
+                            updateStats();
+                            showToast('Summary deleted');
+                        }, 300);
+                    } else {
+                        btn.disabled = false;
+                        btn.textContent = 'Delete';
+                        showToast('Delete failed — try again', true);
+                    }
+                })
+                .catch(() => {
+                    btn.disabled = false;
+                    btn.textContent = 'Delete';
+                    showToast('Network error', true);
+                });
+        }
+
+        // Recalculate stat strip after deletion
+        function updateStats() {
+            const cards = document.querySelectorAll('.card');
+            let total = cards.length, high = 0, med = 0, mtg = 0;
+            cards.forEach(c => {
+                if (c.dataset.risk === 'HIGH') high++;
+                if (c.dataset.risk === 'MEDIUM') med++;
+                if (c.querySelector('.meeting-info')) mtg++;
+            });
+            const nums = document.querySelectorAll('.stat-num');
+            nums[0].textContent = total;
+            nums[1].textContent = high;
+            nums[2].textContent = med;
+            nums[3].textContent = mtg;
+        }
+
+        // ── Toast ─────────────────────────────────────
+        function showToast(msg, isError = false) {
+            const t = document.getElementById('toast');
+            t.textContent = msg;
+            t.className = 'toast' + (isError ? ' error' : '');
+            setTimeout(() => t.classList.add('show'), 10);
+            setTimeout(() => t.classList.remove('show'), 3000);
+        }
+    </script>
+
+</body>
+
+</html>
