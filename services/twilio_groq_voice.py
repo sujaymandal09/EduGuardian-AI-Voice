@@ -2,11 +2,13 @@
 services/twilio_groq_voice.py
 ──────────────────────────────
 2-Way AI Voice — Groq (llama-3.1-8b-instant) + Twilio
+Now with SQLite conversation logging + auto-summary on call end.
 """
 import html
 import logging
 import os
 import re
+import threading
 import time
 from groq import Groq
 from core.models import CallPayload, NotificationResult
@@ -208,28 +210,24 @@ MEETING SCHEDULING:
     - "next week"       — parent said next week
     - "<day name>"      — parent named a specific day, e.g. "Thursday" or "Friday"
     - "next_available"  — parent rejected a time but did NOT name a specific new day
-                          (e.g. "can we do a different time?", "I'm busy then", "any other slot?")
-- CRITICAL: The tag must appear on its OWN line. Do NOT embed it inside a sentence.
-  WRONG: "Let me check [SCHEDULE_MEETING: thursday] for you."
-  RIGHT: "Please wait for a moment, I need to check my schedule.\n[SCHEDULE_MEETING: thursday]"
-- The system intercepts this tag and either:
-  (a) Presents ALL available slots for that day and asks the parent to choose (named day), OR
-  (b) Books the nearest slot and confirms it to the parent (tomorrow / next week / yes), OR
-  (c) Finds remaining slots on the same day first, then advances day by day (next_available).
-- After the system responds with the slot options or confirmation, continue naturally.
+- CRITICAL: The tag must appear on its OWN line.
 - NEVER guess, invent, or hardcode any time. NEVER say "scheduling_meeting" aloud.
-- NEVER write the tag text as spoken words.
-- If the parent says "today" or "right now", emit [SCHEDULE_MEETING: today] — the system
-  will check if any slots are still available today and book one, or explain if none remain.
+- If the parent says "today" or "right now", emit [SCHEDULE_MEETING: today].
+- CRITICAL: This rule applies at ALL stages including farewell. If the parent names
+  a day or asks about scheduling at any point, ALWAYS emit [SCHEDULE_MEETING: <day>].
+  Never verbally confirm a meeting time without first emitting the tag — you do not
+  know what times are available. The system provides the actual time.
+- If a meeting has already been booked (system confirmed a time to the parent) and
+  the parent asks "what time?" or "what was the time?", repeat the confirmed time
+  from the most recent system-confirmed booking in the conversation. Do not invent
+  a new time.
 """
     else:
         scheduling_section = f"""
 MEETING SCHEDULING (DISABLED for this call):
 - NEVER use [SCHEDULE_MEETING:...] — it is disabled for {risk_level.upper()} risk calls.
-- NEVER say "please wait, let me check my schedule" or any variation of it.
 - If the parent asks to meet in person, say:
   "Of course, please call us at {phone} and we'll arrange a time that suits you."
-- Do NOT book or confirm any meeting time on this call.
 """
 
     return f"""You are Priya — a warm, experienced school counselor calling from {school}.
@@ -240,7 +238,7 @@ Office hours: Monday to Friday, 9 AM to 4 PM
 YOUR PERSONALITY:
 - You sound like a real human. Warm, calm, genuinely caring.
 - Speak in clear, natural, grammatically correct English only. No Hindi or mixed-language words whatsoever.
-- Do NOT use words such as: ji, haan, accha, acha, bilkul, theek hai, nahi, or any other Hindi or regional language term — not even as filler or courtesy words.
+- Do NOT use words such as: ji, haan, accha, acha, bilkul, theek hai, nahi, or any other Hindi or regional language term.
 - If the parent speaks in Hindi or mixed language, always reply in English only.
 - You LISTEN first. You acknowledge before moving forward.
 - Never robotic. Never scripted. Never repeat yourself.
@@ -251,7 +249,6 @@ YOUR PERSONALITY:
 STRICT CALL FLOW — FOLLOW THIS ORDER:
 1. Parent confirms who they are → in ONE sentence: acknowledge warmly AND introduce
    yourself as Priya, school counselor at {school}.
-   Example: "I'm so glad I reached you — I'm Priya, the school counselor at {school}."
 2. In the SAME reply, ask if it is a good time to talk. Wait for answer.
    - If YES / free → move to step 3
    - If NO / busy → apologise, offer to call back, say goodbye [END_CALL]
@@ -263,9 +260,6 @@ STRICT CALL FLOW — FOLLOW THIS ORDER:
 8. Close warmly
 
 THIS IS CRITICAL — DO NOT SKIP THE AVAILABILITY CHECK.
-Your first reply must introduce yourself AND ask if it is a good time — both in one breath.
-Do not jump straight to the concern. The parent needs the chance to say
-they are busy before you start discussing sensitive matters.
 
 {dimension_context}
 
@@ -279,37 +273,29 @@ INTERRUPTION HANDLING:
 - Never repeat a sentence they interrupted.
 
 CLOSING:
-- NEVER use [END_CALL] on your own — not even after confirming a meeting.
-  The system controls when the call ends. Wait for the system tag.
+- NEVER use [END_CALL] on your own.
 - When the system adds [SYSTEM: ask about more questions], ask the parent
   if they have any other questions or concerns, in ONE warm sentence. Then use [CONTINUE].
 - When the system adds [SYSTEM: end call now], give ONE warm goodbye sentence that
-  includes the office hours (Monday to Friday, 9 AM to 4 PM) and the school phone
-  number, then use [END_CALL]. This is the ONLY time you may use [END_CALL].
+  includes the office hours and the school phone number, then use [END_CALL].
 - NEVER output or mention [SYSTEM:...] tags in your spoken response.
-- NEVER ask "anything else?" unless you see [SYSTEM: ask about more questions].
 
 SPEECH STYLE:
 - Spoken, natural sentences. Not formal written English.
 - Contractions always. Lists never.
-- English only — no Hindi, no regional language words of any kind.
+- English only.
 
 STRICT RULES:
 1. NEVER greet again after the first message.
 2. NEVER re-introduce yourself mid-call.
 3. ONLY discuss {dimension.upper()}.
 4. 2 to 3 sentences per reply maximum.
-5. Every single word in your reply must be English. Remove any non-English word before responding.
+5. Every single word in your reply must be English.
 6. NEVER invent ANY detail not explicitly stated in the concern details above.
-   This means: no exam names (SSE, ICSE, boards, etc.), no report cards, no subject
-   names, no grades, no test scores, no teacher names, no student names, no club or
-   team names, no incident descriptions beyond what was given. If you were not told
-   it, do not say it. If a parent asks about something you have no data on, say:
-   "I'd prefer we go over those details when we meet in person."
 7. End EVERY reply with one control tag on its own line:
    [CONTINUE]  — keep going
-   [END_CALL]  — end now (only after farewell step 2 is complete)
-   [SCHEDULE_MEETING: <day_preference>]  — only when scheduling a meeting
+   [END_CALL]  — end now (only after farewell)
+   [SCHEDULE_MEETING: <day_preference>]  — only when scheduling
 8. Tags are for system only — never spoken aloud.
 
 You are in a REAL phone call. React naturally. Be human. Speak English only.
@@ -328,14 +314,16 @@ class ConversationState:
         self.turn_count     = 0
         self.stage          = STAGE_INTRO
         self.messages: list[dict] = []
-        self.meeting_pending: bool = False   # True while awaiting slot injection
-
-        # Named-day multi-slot selection state
-        # When parent names a specific day, all free slots are presented and
-        # we wait here until they choose one (or decline).
+        self.meeting_pending: bool = False
         self.pending_slots: list[dict] = []
         self.awaiting_slot_choice: bool = False
         self.last_booked_slot: dict | None = None
+
+        # ── DB tracking ───────────────────────────────────────────
+        # call_id is set by TwoWayAIVoiceService after Twilio returns a SID.
+        # Until then we use a temporary placeholder.
+        self.call_id: str = f"PENDING_{payload.registration}"
+        self.db_turn_number: int = 0   # incremented with every saved turn
 
         self.system_prompt  = _build_counselor_prompt(
             school=school,
@@ -358,6 +346,22 @@ class ConversationState:
         elif self.stage == STAGE_CONVERSATION and self.turn_count >= 5:
             self.stage = STAGE_SOLUTION
 
+    def log_turn(self, role: str, message: str) -> None:
+        """Save a turn to SQLite. role = 'assistant' (Priya) or 'user' (parent)."""
+        if not isinstance(self.call_id, int):
+            return   # DB record not yet created — skip silently
+        from services.database import save_turn
+        try:
+            save_turn(
+                call_id=self.call_id,
+                role=role,
+                content=message,
+                turn_order=self.db_turn_number,
+            )
+            self.db_turn_number += 1
+        except Exception as e:
+            logger.error(f"[DB] log_turn failed: {e}")
+
 
 # ─────────────────────────────────────────────────────────────────
 #  SCHEDULE TAG PARSER
@@ -370,20 +374,12 @@ _SCHEDULE_TAG_CAP_RE = re.compile(
 )
 
 def _extract_schedule_tag(ai_text: str) -> tuple[str, str | None]:
-    """
-    Returns (cleaned_text, day_preference | None).
-    cleaned_text has the tag removed AND any stray tag fragments sanitised.
-    day_preference is the raw preference string, or None if no tag found.
-    """
     match = _SCHEDULE_TAG_CAP_RE.search(ai_text)
     if not match:
-        # Also strip any malformed partial tags the model may have leaked
         cleaned = _SCHEDULE_TAG_RE.sub("", ai_text).strip()
         return cleaned, None
     day_pref = match.group(1).strip().lower()
-    # Remove all schedule-tag variants (including malformed ones)
     cleaned = _SCHEDULE_TAG_RE.sub("", ai_text).strip()
-    # Remove any leftover underscore-joined artefacts like "scheduling_meeting"
     cleaned = re.sub(r'\bscheduling[_\s]meeting\b', '', cleaned, flags=re.IGNORECASE).strip()
     return cleaned, day_pref
 
@@ -402,7 +398,6 @@ _SIMPLE_AFFIRMATIVE = {
 }
 
 def _last_ai_proposed_meeting(state: "ConversationState") -> bool:
-    """True if the most recent AI message proposed or asked about a meeting."""
     last_ai = next(
         (m["content"] for m in reversed(state.messages) if m["role"] == "assistant"),
         ""
@@ -416,7 +411,6 @@ def _is_simple_affirmative(speech: str) -> bool:
 
 
 def _format_time_spoken(t: str) -> str:
-    """Convert 24-hour 'HH:MM' to natural spoken form: '3 PM', '1:45 PM', '9:30 AM'."""
     try:
         h, m = map(int, t.split(":"))
         period = "AM" if h < 12 else "PM"
@@ -429,60 +423,35 @@ def _format_time_spoken(t: str) -> str:
 
 
 def _sanitise_spoken(text: str) -> str:
-    """Strip any control-tag fragments that must never reach TTS."""
     text = _SCHEDULE_TAG_RE.sub("", text)
     text = re.sub(r'\[CONTINUE\]', '', text, flags=re.IGNORECASE)
     text = re.sub(r'\[END_CALL\]', '', text, flags=re.IGNORECASE)
     text = re.sub(r'\[SYSTEM:[^\]]*\]', '', text, flags=re.IGNORECASE)
     text = re.sub(r'\bscheduling[_\s]meeting\b', '', text, flags=re.IGNORECASE)
-    # Fix 2: strip partial / truncated tag fragments left by token cutoff
-    # e.g. "[SCHEDULE_MEETING: thu" with no closing bracket
     text = re.sub(r'\[SCHEDULE_MEETING[^\]]*$', '', text, flags=re.IGNORECASE)
     text = re.sub(r'\[SCHEDULE_[^\]]*$', '', text, flags=re.IGNORECASE)
     return text.strip()
 
 
 def _resolve_slot(day_pref: str) -> dict | None:
-    """
-    For 'today': check today's remaining slots by current time.
-    For 'tomorrow' / generic yes / 'next week': return the single nearest free slot.
-    For a named day: returns the first available slot (use _resolve_slots_for_day
-    when you need ALL slots to present options to the parent).
-    Imported lazily so never loaded during normal call flow.
-    """
     from services.schedule_manager import ScheduleManager, DAY_INDEX
     sm = ScheduleManager()
-
     if any(kw in day_pref for kw in ("today", "right now", "now", "immediately")):
         return sm.get_today_available_slot()
-
     if "next week" in day_pref:
         return sm.get_next_available_slot(prefer_next_week=True)
-
     for day_name in DAY_INDEX:
         if day_name in day_pref:
             slots = _resolve_slots_for_day(day_name)
             return slots[0] if slots else None
-
     return sm.get_next_available_slot(prefer_next_week=False)
 
 
 def _resolve_next_available(state: "ConversationState") -> tuple[list[dict], str]:
-    """
-    Find the next batch of free slots to offer after a rejection.
-
-    Search order:
-      1. Remaining slots on the same day as last_booked_slot (excluding the rejected slot).
-      2. If none, advance day by day (skipping Sunday) until free slots are found.
-
-    Returns (slots_with_date, day_name) or ([], "").
-    """
     from services.schedule_manager import ScheduleManager, _next_weeks_monday
     from datetime import date, timedelta
-
     sm = ScheduleManager()
     today = date.today()
-
     if state.last_booked_slot:
         try:
             start_date = date.fromisoformat(state.last_booked_slot["date"])
@@ -494,48 +463,34 @@ def _resolve_next_available(state: "ConversationState") -> tuple[list[dict], str
         start_date    = today + timedelta(days=1)
         excluded_time = None
         excluded_day  = None
-
     for offset in range(8):
         candidate = start_date + timedelta(days=offset)
         if candidate <= today:
             continue
-        if candidate.weekday() == 6:       # skip Sunday
+        if candidate.weekday() == 6:
             continue
         day_name = candidate.strftime("%A")
         use_next = candidate >= _next_weeks_monday()
         slots = sm.get_available_slots_for_day(day_name, next_week=use_next)
-
-        # On the same day as the rejected slot, exclude that exact slot
         if excluded_day and day_name.lower() == excluded_day and excluded_time:
             slots = [s for s in slots if s["start_time"] != excluded_time]
-
         if slots:
             return [
                 {**s, "date": candidate.isoformat(), "use_next_week": use_next}
                 for s in slots
             ], day_name
-
     return [], ""
 
 
 def _try_next_day_slots(after_day: str, after_date: str) -> tuple[list[dict], str]:
-    """
-    Find free slots on the first working day strictly after *after_date*.
-    Used when a parent declines all options on a given day.
-
-    Returns (slots_with_date, day_name) or ([], "").
-    """
     from services.schedule_manager import ScheduleManager, _next_weeks_monday
     from datetime import date, timedelta
-
     sm = ScheduleManager()
     today = date.today()
-
     try:
         start = date.fromisoformat(after_date) + timedelta(days=1)
     except (ValueError, TypeError):
         start = today + timedelta(days=1)
-
     for offset in range(7):
         candidate = start + timedelta(days=offset)
         if candidate.weekday() == 6:
@@ -548,32 +503,46 @@ def _try_next_day_slots(after_day: str, after_date: str) -> tuple[list[dict], st
                 {**s, "date": candidate.isoformat(), "use_next_week": use_next}
                 for s in slots
             ], day_name
-
     return [], ""
 
 
 def _resolve_slots_for_day(day_name: str) -> list[dict]:
-    """
-    Return ALL free slots for a named day (nearest occurrence).
-    Each dict has: day, start_time, end_time, use_next_week, date.
-    """
     from services.schedule_manager import ScheduleManager, DAY_INDEX, _next_weeks_monday
     from datetime import date, timedelta
-
     sm = ScheduleManager()
     today = date.today()
     target_weekday = DAY_INDEX.get(day_name.lower())
     if target_weekday is None:
         return []
-
     days_ahead = (target_weekday - today.weekday()) % 7
     if days_ahead == 0:
-        days_ahead = 7  # same weekday → next occurrence
+        days_ahead = 7
     target_date = today + timedelta(days=days_ahead)
     use_next = target_date >= _next_weeks_monday()
-
     raw_slots = sm.get_available_slots_for_day(day_name.capitalize(), next_week=use_next)
     return [{**s, "date": target_date.isoformat()} for s in raw_slots]
+
+
+# ─────────────────────────────────────────────────────────────────
+#  BACKGROUND SUMMARY TRIGGER
+# ─────────────────────────────────────────────────────────────────
+def _trigger_summary(state, groq_api_key: str) -> None:
+    """
+    Called in a background thread when the call ends.
+    Generates and saves the summary without blocking the TwiML response.
+    """
+    try:
+        from groq import Groq
+        from services.summary_agent import SummaryAgent
+        agent = SummaryAgent(Groq(api_key=groq_api_key))
+        agent.generate_and_save(
+            call_id=state.call_id,
+            payload=state.payload,
+            last_booked_slot=state.last_booked_slot,
+        )
+        logger.info(f"[Summary] Done for call_id={state.call_id}")
+    except Exception as e:
+        logger.error(f"[Summary] Failed for call_id={state.call_id}: {e}")
 
 
 # ─────────────────────────────────────────────────────────────────
@@ -620,6 +589,9 @@ class TwoWayAIVoiceService:
 
     # ── Ask Groq ──────────────────────────────────────────────────
     def _ask_groq(self, state: ConversationState, parent_speech: str) -> str:
+        # Log parent turn to DB
+        state.log_turn("user", parent_speech)
+
         state.messages.append({"role": "user", "content": parent_speech})
         state.turn_count += 1
         state.advance_stage()
@@ -632,7 +604,7 @@ class TwoWayAIVoiceService:
                     {"role": "system", "content": state.system_prompt}
                 ] + recent,
                 temperature=0.5,
-                max_tokens=120,  # raised from 80 — ensures [SCHEDULE_MEETING] tag is never truncated
+                max_tokens=120,
             )
             ai_text = response.choices[0].message.content.strip()
         except Exception as e:
@@ -643,6 +615,13 @@ class TwoWayAIVoiceService:
             )
 
         state.messages.append({"role": "assistant", "content": ai_text})
+
+        # Log Priya's reply (cleaned) to DB
+        spoken_for_log = _sanitise_spoken(
+            ai_text.replace("[END_CALL]", "").replace("[CONTINUE]", "")
+        )
+        state.log_turn("assistant", spoken_for_log)
+
         return ai_text
 
     # ── Parse control tags ────────────────────────────────────────
@@ -655,12 +634,19 @@ class TwoWayAIVoiceService:
         return spoken, end_call
 
     # ── Build TwiML ───────────────────────────────────────────────
-    def _twiml(self, spoken: str, end_call: bool) -> str:
+    def _twiml(self, spoken: str, end_call: bool, state: ConversationState | None = None) -> str:
         safe    = html.escape(spoken)
         safe_ph = html.escape(self._phone)
         webhook = f"{self._ngrok_url}/handle-parent-response"
 
         if end_call:
+            # Trigger summary in background
+            if state and self._groq_key:
+                threading.Thread(
+                    target=_trigger_summary,
+                    args=(state, self._groq_key),
+                    daemon=True
+                ).start()
             return f"""<?xml version="1.0" encoding="UTF-8"?>
 <Response>
     <Say voice="Polly.Aditi" language="en-IN">{safe}</Say>
@@ -727,9 +713,6 @@ class TwoWayAIVoiceService:
             return self._handle_slot_choice(state, parent_speech, registration)
 
         # ── Meeting-agreement shortcut (HIGH risk only) ───────────
-        # When parent says a simple "yes/sure/okay/available" directly after
-        # Priya proposed a meeting, skip the LLM entirely and book immediately.
-        # This prevents the model from mishandling single-word affirmatives.
         if (
             state.payload.risk_level.upper() == "HIGH"
             and state.stage in (STAGE_AVAILABILITY, STAGE_CONVERSATION, STAGE_SOLUTION)
@@ -750,19 +733,19 @@ class TwoWayAIVoiceService:
                 sm.book_slot(slot["day"], slot["start_time"], next_week=slot.get("use_next_week", False))
                 state.last_booked_slot = slot
                 slot_str = f"{slot['day']} at {_format_time_spoken(slot['start_time'])}"
-                logger.info(f"[Scheduler] Agreement shortcut: booked {slot_str} for reg={registration}")
                 spoken = (
                     f"That's great to hear! Let me just check my schedule. "
                     f"I've booked you in for {slot_str}. "
                     f"We really look forward to seeing you then. "
                     f"Is there anything else you'd like to discuss before we wrap up?"
                 )
+                state.log_turn("user", parent_speech)
+                state.log_turn("assistant", spoken)
                 state.messages.append({"role": "user", "content": parent_speech})
                 state.messages.append({"role": "assistant", "content": spoken})
                 state.turn_count += 1
                 state.stage = STAGE_FAREWELL
-                return self._twiml(spoken, end_call=False)
-            # If no slot today/tomorrow, fall through to normal AI flow
+                return self._twiml(spoken, end_call=False, state=state)
 
         # ── Stage-aware closing detection ─────────────────────────
         if _parent_wants_to_end(parent_speech, state.stage):
@@ -787,17 +770,10 @@ class TwoWayAIVoiceService:
 
         # ── Schedule meeting tag detection ────────────────────────
         pre_schedule_text, day_pref = _extract_schedule_tag(ai_text)
-        # Sanitise pre_schedule_text so no tag fragment reaches TTS
         pre_schedule_text = _sanitise_spoken(pre_schedule_text)
 
-        # Fix 1: MEDIUM/LOW risk must NEVER book a slot.
-        # Strip the tag and speak Priya's monitoring text as-is.
+        # MEDIUM/LOW: suppress scheduling
         if day_pref is not None and state.payload.risk_level.upper() != "HIGH":
-            logger.info(
-                f"[Scheduler] Suppressed scheduling for {state.payload.risk_level} risk "
-                f"(reg={registration})"
-            )
-            # Strip any leaked "please wait / check my schedule" phrase
             pre_schedule_text = re.sub(
                 r"please wait[^.!?]*[.!?]?\s*", "", pre_schedule_text, flags=re.IGNORECASE
             ).strip()
@@ -808,19 +784,16 @@ class TwoWayAIVoiceService:
             spoken = _sanitise_spoken(spoken)
             if end_call:
                 state.ended = True
-            return self._twiml(spoken, end_call)
+            return self._twiml(spoken, end_call, state=state)
 
-        # HIGH risk: far-future preference (next month / next year) → redirect to school
+        # Far-future rejection
         _FAR_FUTURE = ("next month", "month", "next year", "year", "few weeks", "some time")
         if (
             day_pref is not None
             and state.payload.risk_level.upper() == "HIGH"
             and any(kw in day_pref for kw in _FAR_FUTURE)
-            and "next week" not in day_pref   # "next week" is acceptable
+            and "next week" not in day_pref
         ):
-            logger.info(
-                f"[Scheduler] Far-future ({day_pref!r}) rejected for HIGH risk reg={registration}"
-            )
             spoken = (
                 f"I completely understand you're very busy, and I don't want to add to your stress. "
                 f"But I do want to be honest — this situation is quite serious, and waiting that long "
@@ -830,12 +803,11 @@ class TwoWayAIVoiceService:
             )
             spoken = _sanitise_spoken(spoken)
             state.stage = STAGE_SOLUTION
-            return self._twiml(spoken, end_call=False)
+            return self._twiml(spoken, end_call=False, state=state)
 
         if day_pref is not None:
             from services.schedule_manager import DAY_INDEX
 
-            # Check whether parent named a specific day
             named_day = None
             if "next week" not in day_pref and day_pref not in ("tomorrow", "yes", "soonest"):
                 for d in DAY_INDEX:
@@ -843,9 +815,7 @@ class TwoWayAIVoiceService:
                         named_day = d
                         break
 
-            # ── next_available: check same day first, then advance ──
             if "next_available" in day_pref:
-                # Cancel prior booking — parent is moving to a different slot
                 if state.last_booked_slot:
                     from services.schedule_manager import ScheduleManager as _SM
                     _SM().cancel_slot(
@@ -865,18 +835,16 @@ class TwoWayAIVoiceService:
                         f"I've checked and on {day_name} we have slots available at {times}. "
                         f"Which time works best for you?"
                     ).strip()
-                    logger.info(f"[Scheduler] next_available → {len(slots)} slots on {day_name} for reg={registration}")
-                    return self._twiml(spoken, end_call=False)
+                    return self._twiml(spoken, end_call=False, state=state)
                 else:
                     spoken = (
                         f"{pre_schedule_text} "
                         f"I'm afraid we don't have any free slots available over the next few days. "
                         f"Please call us directly at {self._phone} to arrange a time that suits you."
                     ).strip()
-                    return self._twiml(spoken, end_call=False)
+                    return self._twiml(spoken, end_call=False, state=state)
 
             if named_day:
-                # Cancel any prior booking immediately — parent is switching days
                 if state.last_booked_slot:
                     from services.schedule_manager import ScheduleManager as _SM
                     _SM().cancel_slot(
@@ -885,7 +853,6 @@ class TwoWayAIVoiceService:
                         next_week=state.last_booked_slot.get("use_next_week", False),
                     )
                     state.last_booked_slot = None
-
                 slots = _resolve_slots_for_day(named_day)
                 if slots:
                     state.pending_slots = slots
@@ -897,18 +864,16 @@ class TwoWayAIVoiceService:
                         f"I've checked and on {named_day.capitalize()} we have slots available at {times}. "
                         f"Which time works best for you?"
                     ).strip()
-                    logger.info(f"[Scheduler] Offering {len(slots)} slots on {named_day} to reg={registration}")
-                    return self._twiml(spoken, end_call=False)
+                    return self._twiml(spoken, end_call=False, state=state)
                 else:
                     spoken = (
                         f"{pre_schedule_text} "
                         f"I'm sorry, we don't have any free slots on {named_day.capitalize()}. "
                         f"Would another day work for you?"
                     ).strip()
-                    return self._twiml(spoken, end_call=False)
+                    return self._twiml(spoken, end_call=False, state=state)
 
             else:
-                # today / tomorrow / next week / generic yes → book the nearest single slot
                 is_today = any(kw in day_pref for kw in ("today", "right now", "now", "immediately"))
                 slot = _resolve_slot(day_pref)
                 if slot:
@@ -923,7 +888,6 @@ class TwoWayAIVoiceService:
                     sm.book_slot(slot["day"], slot["start_time"], next_week=slot.get("use_next_week", False))
                     state.last_booked_slot = slot
                     slot_str = f"{slot['day']} at {_format_time_spoken(slot['start_time'])}"
-                    logger.info(f"[Scheduler] Booked: {slot_str} for reg={registration}")
                     spoken = (
                         f"{pre_schedule_text} "
                         f"I've booked you in for {slot_str}. "
@@ -931,7 +895,7 @@ class TwoWayAIVoiceService:
                         f"Is there anything else you'd like to discuss before we wrap up?"
                     ).strip()
                     state.stage = STAGE_FAREWELL
-                    return self._twiml(spoken, end_call=False)
+                    return self._twiml(spoken, end_call=False, state=state)
                 else:
                     if is_today:
                         spoken = (
@@ -946,11 +910,10 @@ class TwoWayAIVoiceService:
                             f"I'm afraid we don't have any free slots available in the next few days. "
                             f"Please call us directly at {self._phone} to arrange a time that suits you."
                         ).strip()
-                    return self._twiml(spoken, end_call=False)
+                    return self._twiml(spoken, end_call=False, state=state)
 
         # ── Normal flow ───────────────────────────────────────────
         spoken, end_call = self._parse_reply(ai_text)
-        # Bug 3 fix: always sanitise spoken text before sending to TTS
         spoken = _sanitise_spoken(spoken)
 
         if end_call:
@@ -960,19 +923,12 @@ class TwoWayAIVoiceService:
         print(f"  [AI] Priya  : \"{spoken[:90]}{'...' if len(spoken) > 90 else ''}\"")
         print(f"  [INFO] Turn: {state.turn_count} | Stage: {state.stage} | End: {end_call}")
 
-        return self._twiml(spoken, end_call)
+        return self._twiml(spoken, end_call, state=state)
 
-    # ── Slot choice handler (named-day multi-slot flow) ───────────
+    # ── Slot choice handler ───────────────────────────────────────
     def _handle_slot_choice(self, state: "ConversationState", parent_speech: str, registration: str) -> str:
-        """
-        Called when state.awaiting_slot_choice is True.
-        Tries to match the parent's reply to one of the pending_slots.
-        On match: books it, clears state, moves to farewell flow.
-        On no match or decline: re-presents options or exits gracefully.
-        """
         speech_lower = parent_speech.lower().strip()
 
-        # ── Day-switch: parent names a different day while in slot-choice flow ──
         from services.schedule_manager import DAY_INDEX
         current_day = state.pending_slots[0]["day"].lower() if state.pending_slots else ""
         requested_day = None
@@ -982,7 +938,6 @@ class TwoWayAIVoiceService:
                 break
 
         if requested_day and requested_day != current_day:
-            # Cancel any currently booked slot and redirect to the requested day
             if state.last_booked_slot:
                 from services.schedule_manager import ScheduleManager
                 sm = ScheduleManager()
@@ -994,7 +949,6 @@ class TwoWayAIVoiceService:
                 state.last_booked_slot = None
             state.pending_slots        = []
             state.awaiting_slot_choice = False
-
             slots = _resolve_slots_for_day(requested_day)
             if slots:
                 state.pending_slots        = slots
@@ -1005,26 +959,22 @@ class TwoWayAIVoiceService:
                     f"Of course! On {requested_day.capitalize()} we have slots available at {times}. "
                     f"Which time works best for you?"
                 )
-                logger.info(f"[Scheduler] Day-switch → {requested_day} for reg={registration}")
-                return self._twiml(spoken, end_call=False)
+                return self._twiml(spoken, end_call=False, state=state)
             else:
                 spoken = (
                     f"I'm sorry, we don't have any free slots on {requested_day.capitalize()}. "
                     f"Would another day work for you?"
                 )
-                return self._twiml(spoken, end_call=False)
+                return self._twiml(spoken, end_call=False, state=state)
 
-        # Check if parent is declining the presented slots
-        decline_signals = ["no", "none", "different day", "another day", "cancel", "forget it", "never mind",
-                           "not available", "can't make", "cannot make", "won't work", "doesn't work"]
+        decline_signals = ["no", "none", "different day", "another day", "cancel", "forget it",
+                           "never mind", "not available", "can't make", "cannot make",
+                           "won't work", "doesn't work"]
         if any(sig in speech_lower for sig in decline_signals):
-            # Remember which day/date we just rejected so _try_next_day_slots advances past it
             rejected_day  = state.pending_slots[0]["day"]  if state.pending_slots else ""
             rejected_date = state.pending_slots[0].get("date", "") if state.pending_slots else ""
             state.pending_slots        = []
             state.awaiting_slot_choice = False
-
-            # Automatically try the next working day
             next_slots, next_day = _try_next_day_slots(rejected_day, rejected_date)
             if next_slots:
                 state.pending_slots        = next_slots
@@ -1035,8 +985,7 @@ class TwoWayAIVoiceService:
                     f"No problem. I've checked and on {next_day} we have slots available at {times}. "
                     f"Would any of those work for you?"
                 )
-                logger.info(f"[Scheduler] Declined {rejected_day} → offering {next_day} for reg={registration}")
-                return self._twiml(spoken, end_call=False)
+                return self._twiml(spoken, end_call=False, state=state)
             else:
                 state.stage = STAGE_FAREWELL
                 spoken = (
@@ -1044,30 +993,25 @@ class TwoWayAIVoiceService:
                     f"over the next few days. Please call us at {self._phone} and we'll do our best "
                     f"to find a time that works for you."
                 )
-                return self._twiml(spoken, end_call=False)
+                return self._twiml(spoken, end_call=False, state=state)
 
-        # Try to find a time match in parent's speech
         matched_slot = None
         for slot in state.pending_slots:
             st = slot["start_time"]
-            # 24-hour digit match: "1345" in "1345 would be best"
             if st.replace(":", "") in speech_lower.replace(":", ""):
                 matched_slot = slot
                 break
-            # 12-hour spoken form: "1:45 pm" or "1:45pm" for slot "13:45"
-            spoken_fmt = _format_time_spoken(st).lower()          # e.g. "1:45 pm"
-            spoken_nsp = spoken_fmt.replace(" ", "")              # "1:45pm"
+            spoken_fmt = _format_time_spoken(st).lower()
+            spoken_nsp = spoken_fmt.replace(" ", "")
             speech_nsp = speech_lower.replace(" ", "")
             if spoken_fmt in speech_lower or spoken_nsp in speech_nsp:
                 matched_slot = slot
                 break
-            # Hour-only 24h match: " 13 " for "13:45"
             hour24 = st.split(":")[0].lstrip("0") or "0"
             if f" {hour24} " in f" {speech_lower} " or speech_lower.startswith(hour24):
                 matched_slot = slot
                 break
-            # Hour-only 12h match: " 1 " for "1:45 PM"
-            hour12 = spoken_fmt.split(":")[0].split(" ")[0]       # "1" or "3"
+            hour12 = spoken_fmt.split(":")[0].split(" ")[0]
             if hour12 != hour24:
                 if f" {hour12} " in f" {speech_lower} " or speech_lower.startswith(hour12 + " ") or speech_lower.startswith(hour12 + ":"):
                     matched_slot = slot
@@ -1090,21 +1034,17 @@ class TwoWayAIVoiceService:
             )
             state.pending_slots = []
             state.awaiting_slot_choice = False
-
             if booked:
                 state.last_booked_slot = matched_slot
                 slot_str = f"{matched_slot['day']} at {_format_time_spoken(matched_slot['start_time'])}"
-                logger.info(f"[Scheduler] Booked (choice): {slot_str} for reg={registration}")
-                # Bug 1 fix: after confirming booking, ask about more questions
                 state.stage = STAGE_FAREWELL
                 spoken = (
                     f"Perfect, I've booked you in for {slot_str}. "
                     f"We look forward to seeing you then. "
                     f"Is there anything else you'd like to discuss before we wrap up?"
                 )
-                return self._twiml(spoken, end_call=False)
+                return self._twiml(spoken, end_call=False, state=state)
             else:
-                # Slot was just taken by another call — offer remaining options
                 remaining = _resolve_slots_for_day(matched_slot["day"].lower())
                 if remaining:
                     state.pending_slots = remaining
@@ -1121,9 +1061,8 @@ class TwoWayAIVoiceService:
                         f"I'm sorry, all slots on {matched_slot['day']} have just been filled. "
                         f"Please call us at {self._phone} to arrange an alternative time."
                     )
-                return self._twiml(spoken, end_call=False)
+                return self._twiml(spoken, end_call=False, state=state)
 
-        # Parent's reply didn't match any slot — re-present the options
         times = ", ".join(_format_time_spoken(s["start_time"]) for s in state.pending_slots)
         day = state.pending_slots[0]["day"] if state.pending_slots else "that day"
         spoken = (
@@ -1131,7 +1070,7 @@ class TwoWayAIVoiceService:
             f"The available slots on {day} are {times}. "
             f"Which one works best for you?"
         )
-        return self._twiml(spoken, end_call=False)
+        return self._twiml(spoken, end_call=False, state=state)
 
     # ── make_call ─────────────────────────────────────────────────
     def make_call(self, payload: CallPayload) -> NotificationResult:
@@ -1145,6 +1084,21 @@ class TwoWayAIVoiceService:
         state = ConversationState(payload, self._school, self._phone)
         self._conversations[payload.registration] = state
         print(f"[OK] Ready: {payload.student_name} [{payload.dimension.upper()} / {payload.risk_level}]")
+
+        # Create DB record before the call so turns save correctly
+        try:
+            from services.database import create_call_record
+            db_call_id = create_call_record(
+                registration=payload.registration,
+                student_name=payload.student_name,
+                parent_name=payload.parent_name,
+                dimension=payload.dimension,
+                risk_level=payload.risk_level,
+            )
+            state.call_id = db_call_id
+            print(f"   [DB] Call record created: db_call_id={db_call_id}")
+        except Exception as e:
+            logger.error(f"[DB] create_call_record failed: {e}")
 
         twiml = self._opening_twiml(payload)
 
@@ -1203,7 +1157,7 @@ class TwoWayDemoService:
     def make_call(self, payload: CallPayload) -> NotificationResult:
         self.calls_made.append(payload)
         print(f"\n{'═'*56}")
-        print(f"  🖥️  DEMO MODE — {payload.dimension.upper()}")
+        print(f"  DEMO MODE — {payload.dimension.upper()}")
         print(f"  Student: {payload.student_name}   Parent: {payload.parent_name}")
         print(f"  (Set GROQ_API_KEY for real AI calls)")
         print(f"{'═'*56}\n")
