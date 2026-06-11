@@ -1,5 +1,6 @@
 <!DOCTYPE html>
 <html lang="en">
+
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
@@ -23,7 +24,7 @@
             margin: 0 auto;
             background: white;
             border-radius: 20px;
-            box-shadow: 0 20px 60px rgba(0,0,0,0.3);
+            box-shadow: 0 20px 60px rgba(0, 0, 0, 0.3);
             overflow: hidden;
         }
 
@@ -66,7 +67,7 @@
 
         .stat-card:hover {
             transform: translateY(-5px);
-            box-shadow: 0 10px 20px rgba(0,0,0,0.1);
+            box-shadow: 0 10px 20px rgba(0, 0, 0, 0.1);
         }
 
         .stat-card .number {
@@ -102,6 +103,16 @@
             color: white;
             transform: translateX(10px);
             border-color: #764ba2;
+        }
+
+        .menu-item.highlight {
+            background: #ebf8ff;
+            border-color: #4299e1;
+        }
+
+        .menu-item.highlight:hover {
+            background: #4299e1;
+            color: white;
         }
 
         .menu-item .icon {
@@ -162,12 +173,19 @@
             color: #742a2a;
             border: 1px solid #fc8181;
         }
+
+        .divider {
+            border: none;
+            border-top: 2px solid #e9ecef;
+            margin: 24px 0;
+        }
     </style>
 </head>
+
 <body>
     <div class="container">
         <div class="header">
-            <h1>📚 Attendance Guardian</h1>
+            <h1>📚 EduGuardian</h1>
             <p>Student Risk Monitoring & Parent Notification System</p>
         </div>
 
@@ -187,12 +205,15 @@
                 </div>
             </div>
 
-            {% if message %}
-            <div class="alert alert-{{ message_type }}">{{ message }}</div>
+            {% with messages = get_flashed_messages(with_categories=true) %}
+            {% if messages %}
+            {% for category, message in messages %}
+            <div class="alert alert-{{ category }}">{{ message }}</div>
+            {% endfor %}
             {% endif %}
+            {% endwith %}
 
-            <h2 style="margin-bottom: 20px;">Select Analysis Type</h2>
-            
+            <h2 style="margin-bottom: 20px;">Run Analysis</h2>
             <div class="menu">
                 <a href="/analyze/attendance" class="menu-item">
                     <span class="icon">📊</span>
@@ -201,7 +222,6 @@
                         <p>Check students with low attendance or consecutive absences</p>
                     </div>
                 </a>
-
                 <a href="/analyze/performance" class="menu-item">
                     <span class="icon">📝</span>
                     <div class="text">
@@ -209,7 +229,6 @@
                         <p>Identify students struggling academically</p>
                     </div>
                 </a>
-
                 <a href="/analyze/behavior" class="menu-item">
                     <span class="icon">⚠️</span>
                     <div class="text">
@@ -217,12 +236,24 @@
                         <p>Monitor students with behavioral concerns</p>
                     </div>
                 </a>
-
                 <a href="/analyze/all" class="menu-item">
                     <span class="icon">🔄</span>
                     <div class="text">
                         <h3>Run All Checks</h3>
                         <p>Complete analysis across all dimensions</p>
+                    </div>
+                </a>
+            </div>
+
+            <hr class="divider">
+
+            <h2 style="margin-bottom: 16px;">Call Records</h2>
+            <div class="menu">
+                <a href="/summaries" class="menu-item highlight">
+                    <span class="icon">📋</span>
+                    <div class="text">
+                        <h3>View Call Summaries</h3>
+                        <p>AI-generated summaries of all parent conversations</p>
                     </div>
                 </a>
             </div>
@@ -234,4 +265,5 @@
         </div>
     </div>
 </body>
+
 </html>
