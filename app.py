@@ -3,6 +3,7 @@ app.py - EduGuardian with Groq 2-Way AI Voice
 """
 import csv
 import os
+import traceback
 from flask import Flask, render_template, request, redirect, url_for, flash, jsonify
 from dotenv import load_dotenv
 from core.models import StudentRecord, CallPayload
@@ -16,23 +17,18 @@ app = Flask(__name__)
 app.secret_key = os.getenv("SECRET_KEY", "attendance-guardian-secret")
 
 voice_service = None
-last_results = {}
-call_sid_map = {}
+last_results  = {}
 silence_count = {}
 
 os.makedirs('data', exist_ok=True)
 CSV_PATH = os.path.join('data', 'students.csv')
 
-# ── Initialise SQLite database ─────────────────────────────────
 from services.database import init_db, get_all_summaries, delete_summary
 init_db()
-# ──────────────────────────────────────────────────────────────
 
-# ── Sync schedule from Weekly_Schedule.csv, then roll over week ──
 from services.schedule_manager import ScheduleManager, sync_from_weekly_csv
 sync_from_weekly_csv()
 ScheduleManager().reset_week_if_needed()
-# ──────────────────────────────────────────────────────────────
 
 
 def get_voice_service():
@@ -141,7 +137,6 @@ def analyze(dimension):
 
 @app.route('/call/selective', methods=['POST'])
 def call_selective():
-    global call_sid_map
     selected  = request.form.getlist('selected_students')
     dimension = request.form.get('dimension', 'unknown')
 
@@ -171,19 +166,69 @@ def call_selective():
     voice   = get_voice_service()
     results = voice.make_batch_calls(payloads)
 
-    for detail in results.get("details", []):
-        sid = detail.get("sid")
-        reg = detail.get("registration")
-        if sid and reg:
-            call_sid_map[sid] = reg
-
     return render_template('call_status.html', results=results, dimension=dimension)
+
+
+def _resolve_registration(voice, call_sid: str, to_number: str) -> str | None:
+    """
+    Resolve registration number from a Twilio CallSid.
+    
+    Three lookups in order of reliability:
+    1. voice._call_sid_map  — set inside make_call() after call.create() returns.
+       May miss the very first webhook due to race condition (Twilio fires before
+       make_call() sets the map). Subsequent turns always hit this.
+    2. voice._phone_to_reg  — set BEFORE call.create() using payload.to_number.
+       Catches the race-condition webhook reliably.
+    3. Single active conversation fallback — works when only 1 call is active.
+    """
+    # Primary: SID map (set after call.create)
+    if hasattr(voice, '_call_sid_map'):
+        reg = voice._call_sid_map.get(call_sid)
+        if reg:
+            # Opportunistically sync SID → reg from phone map if not already set
+            return reg
+
+    # Secondary: phone number map (set BEFORE call.create — no race condition)
+    if hasattr(voice, '_phone_to_reg') and to_number:
+        reg = voice._phone_to_reg.get(to_number)
+        if reg:
+            print(f"   [INFO] Resolved via phone map: {to_number} → {reg}")
+            # Backfill the SID map so future turns use the fast path
+            if hasattr(voice, '_call_sid_map'):
+                voice._call_sid_map[call_sid] = reg
+            return reg
+
+    # Fallback: only one conversation active
+    if hasattr(voice, '_conversations'):
+        active = [k for k, v in voice._conversations.items() if not getattr(v, 'ended', False)]
+        if len(active) == 1:
+            print(f"   [WARN] Using sole active conversation: {active[0]}")
+            if hasattr(voice, '_call_sid_map'):
+                voice._call_sid_map[call_sid] = active[0]
+            return active[0]
+
+    return None
 
 
 @app.route('/handle-parent-response', methods=['GET', 'POST'])
 def handle_parent_response():
+    # Wrap the ENTIRE handler so Flask never returns a 500 to Twilio
+    try:
+        return _handle_parent_response_inner()
+    except Exception:
+        traceback.print_exc()
+        phone = os.getenv('SCHOOL_PHONE', '033-4805-1910')
+        return f"""<?xml version="1.0" encoding="UTF-8"?>
+<Response>
+    <Say voice="Polly.Aditi" language="en-IN">I'm sorry, there was a technical issue. Please call us at {phone}. Goodbye.</Say>
+</Response>""", 200, {'Content-Type': 'text/xml'}
+
+
+def _handle_parent_response_inner():
     parent_speech = request.form.get('SpeechResult', '').strip()
     call_sid      = request.form.get('CallSid', '')
+    # Twilio sends the dialled number as "To" or "Called"
+    to_number     = request.form.get('To', '') or request.form.get('Called', '')
 
     print(f"\n[CALL] CallSid : {call_sid}")
     print(f"   Parent  : \"{parent_speech}\"")
@@ -192,47 +237,65 @@ def handle_parent_response():
     ngrok  = os.getenv('NGROK_URL', '')
     phone  = os.getenv('SCHOOL_PHONE', '033-4805-1910')
 
+    # ── Silence / no speech ───────────────────────────────────────
     if not parent_speech:
         count = silence_count.get(call_sid, 0) + 1
         silence_count[call_sid] = count
 
         if count == 1:
-            print(f"   [Silence #{count}] — asking once")
+            print(f"   [Silence #{count}] — re-prompting")
             return f"""<?xml version="1.0" encoding="UTF-8"?>
 <Response>
     <Gather input="speech" language="en-IN"
             action="{ngrok}/handle-parent-response"
             method="POST"
-            timeout="5"
+            timeout="8"
             speechTimeout="auto">
         <Say voice="Polly.Aditi" language="en-IN">I'm sorry, I couldn't catch that. Please go ahead whenever you're ready.</Say>
     </Gather>
-    <Say voice="Polly.Aditi" language="en-IN">I wasn't able to hear a response. I will note this and follow up if needed. Thank you for your time. Have a good day.</Say>
+    <Redirect method="POST">{ngrok}/handle-parent-response</Redirect>
+</Response>""", 200, {'Content-Type': 'text/xml'}
+
+        elif count == 2:
+            print(f"   [Silence #{count}] — second reprompt")
+            return f"""<?xml version="1.0" encoding="UTF-8"?>
+<Response>
+    <Gather input="speech" language="en-IN"
+            action="{ngrok}/handle-parent-response"
+            method="POST"
+            timeout="10"
+            speechTimeout="auto">
+        <Say voice="Polly.Aditi" language="en-IN">I'm still here. Take your time, please go ahead.</Say>
+    </Gather>
+    <Say voice="Polly.Aditi" language="en-IN">I wasn't able to hear a response. I will note this and follow up. Thank you and have a good day.</Say>
 </Response>""", 200, {'Content-Type': 'text/xml'}
 
         else:
-            print(f"   [Silence #{count}] — closing gracefully")
+            print(f"   [Silence #{count}] — closing")
             silence_count.pop(call_sid, None)
             return f"""<?xml version="1.0" encoding="UTF-8"?>
 <Response>
-    <Say voice="Polly.Aditi" language="en-IN">I couldn't clearly hear the response, so I will conclude here for now. Please feel free to contact us at {phone}. Thank you and have a good day.</Say>
+    <Say voice="Polly.Aditi" language="en-IN">I couldn't hear a response, so I'll conclude here. Please call us at {phone}. Thank you and have a good day.</Say>
 </Response>""", 200, {'Content-Type': 'text/xml'}
 
     silence_count.pop(call_sid, None)
 
-    registration = call_sid_map.get(call_sid)
-    if not registration and hasattr(voice, '_conversations'):
-        active = list(voice._conversations.keys())
-        if len(active) == 1:
-            registration = active[0]
+    # ── Resolve registration ──────────────────────────────────────
+    registration = _resolve_registration(voice, call_sid, to_number)
 
-    if registration and hasattr(voice, 'generate_followup_twiml'):
+    if not registration:
+        print(f"   [ERROR] Could not resolve registration for SID={call_sid} To={to_number}")
+        return f"""<?xml version="1.0" encoding="UTF-8"?>
+<Response>
+    <Say voice="Polly.Aditi" language="en-IN">I'm sorry, there was a technical issue. Please contact the college at {phone}. Goodbye.</Say>
+</Response>""", 200, {'Content-Type': 'text/xml'}
+
+    # ── Delegate to voice service ─────────────────────────────────
+    if hasattr(voice, 'generate_followup_twiml'):
         try:
             twiml = voice.generate_followup_twiml(registration, parent_speech)
             return twiml, 200, {'Content-Type': 'text/xml'}
         except Exception:
-            import traceback
-            print(f"\n[ERROR] generate_followup_twiml crashed for reg={registration}:")
             traceback.print_exc()
             return f"""<?xml version="1.0" encoding="UTF-8"?>
 <Response>
@@ -245,18 +308,15 @@ def handle_parent_response():
 </Response>""", 200, {'Content-Type': 'text/xml'}
 
 
-# ── Summaries Dashboard ────────────────────────────────────────
+# ── Summaries ──────────────────────────────────────────────────
 
 @app.route('/summaries')
 def summaries():
-    """Teacher dashboard — shows all AI-generated call summaries."""
     all_summaries = get_all_summaries()
-
-    total      = len(all_summaries)
-    meetings   = sum(1 for s in all_summaries if s.get('meeting_booked'))
-    high_risk  = sum(1 for s in all_summaries if s.get('risk_level') == 'HIGH')
-    medium_risk= sum(1 for s in all_summaries if s.get('risk_level') == 'MEDIUM')
-
+    total       = len(all_summaries)
+    meetings    = sum(1 for s in all_summaries if s.get('meeting_booked'))
+    high_risk   = sum(1 for s in all_summaries if s.get('risk_level') == 'HIGH')
+    medium_risk = sum(1 for s in all_summaries if s.get('risk_level') == 'MEDIUM')
     return render_template('dashboard.html',
                            summaries=all_summaries,
                            total=total,
@@ -267,11 +327,8 @@ def summaries():
 
 @app.route('/summaries/delete/<call_id>', methods=['POST'])
 def delete_summary_route(call_id):
-    """Delete a single call summary + its transcript. Returns JSON."""
     success = delete_summary(call_id)
     return jsonify({"success": success})
-
-# ──────────────────────────────────────────────────────────────
 
 
 @app.route('/upload', methods=['GET', 'POST'])
@@ -280,10 +337,9 @@ def upload():
         file = request.files.get('file')
         if file and file.filename.endswith('.csv'):
             file.save(CSV_PATH)
-            global voice_service, last_results, call_sid_map, silence_count
+            global voice_service, last_results, silence_count
             voice_service = None
             last_results  = {}
-            call_sid_map  = {}
             silence_count = {}
             flash("✅ Uploaded!", "success")
             return redirect(url_for('index'))
@@ -293,10 +349,9 @@ def upload():
 
 @app.route('/reset')
 def reset():
-    global voice_service, last_results, call_sid_map, silence_count
+    global voice_service, last_results, silence_count
     voice_service = None
     last_results  = {}
-    call_sid_map  = {}
     silence_count = {}
     flash("✅ Reset!", "success")
     return redirect(url_for('index'))
