@@ -17,6 +17,10 @@ from services.database import _get_conn
 logger = logging.getLogger(__name__)
 
 WEEKLY_CSV_PATH = os.path.join("data", "Weekly_Schedule.csv")
+
+# Minimum lead time: a slot must be at least this many minutes in the future
+# to be offered to a parent. 90 minutes gives time to travel.
+MINIMUM_LEAD_MINUTES = 90
 DAYS = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"]
 DAY_INDEX = {d.lower(): i for i, d in enumerate(DAYS)}
 DAY_INDEX["sunday"] = 6
@@ -122,16 +126,18 @@ class ScheduleManager:
 
     def get_today_available_slot(self, risk_level: str = "MEDIUM") -> Optional[dict]:
         today_str = date.today().isoformat()
-        now_str = (datetime.now() + timedelta(hours=2)).strftime("%H:%M") 
+        # Only offer slots at least MINIMUM_LEAD_MINUTES away — parents need travel time
+        cutoff = (datetime.now() + timedelta(minutes=MINIMUM_LEAD_MINUTES)).strftime("%H:%M")
         slots = self.get_available_slots_for_day(date.today().strftime("%A"), date_iso=today_str, risk_level=risk_level)
-        slots = [s for s in slots if s["start_time"] > now_str]
+        slots = [s for s in slots if s["start_time"] >= cutoff]
         return slots[0] if slots else None
 
     def get_next_available_slot(self, prefer_next_week: bool = False, risk_level: str = "MEDIUM") -> Optional[dict]:
         start = _next_weeks_monday() if prefer_next_week else date.today()
         if date.today().weekday() == 5 and not prefer_next_week: start += timedelta(days=2) 
         
-        now_str = (datetime.now() + timedelta(hours=2)).strftime("%H:%M")
+        # Only offer slots at least MINIMUM_LEAD_MINUTES away when the slot is today
+        cutoff = (datetime.now() + timedelta(minutes=MINIMUM_LEAD_MINUTES)).strftime("%H:%M")
 
         for offset in range(14):
             candidate = start + timedelta(days=offset)
@@ -139,7 +145,7 @@ class ScheduleManager:
             
             slots = self.get_available_slots_for_day(candidate.strftime("%A"), date_iso=candidate.isoformat(), risk_level=risk_level)
             if candidate == date.today():
-                slots = [s for s in slots if s["start_time"] > now_str]
+                slots = [s for s in slots if s["start_time"] >= cutoff]
             if slots:
                 return slots[0] 
         return None

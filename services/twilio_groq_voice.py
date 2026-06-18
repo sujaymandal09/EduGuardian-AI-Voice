@@ -199,7 +199,7 @@ MEETING SCHEDULING (DISABLED):
     return f"""You are Priya — a warm, experienced school counselor calling from {school}.
 You are speaking with {parent_name}, parent of {student_name}.
 School phone: {phone}
-Office hours: Monday to Friday, 9 AM to 4 PM
+Office hours: Monday to Saturday, 9 AM to 4 PM
 
 TODAY'S DATE: {today_str}
 - Use this exact date if the parent asks what day it is.
@@ -417,6 +417,10 @@ def _resolve_slots_for_day_or_next(day_pref: str) -> list[dict]:
         if day_name in day_pref:
             return _resolve_slots_for_day(day_name, force_next_week="next week" in day_pref)
 
+    # 90-minute minimum lead time for today's slots — parents need travel time
+    MINIMUM_LEAD_MINUTES = 90
+    cutoff_str = (datetime.now() + timedelta(minutes=MINIMUM_LEAD_MINUTES)).strftime("%H:%M")
+
     start_offset = 1 if "tomorrow" in day_pref else 0
     for offset in range(start_offset, 14):
         candidate = today + timedelta(days=offset)
@@ -426,7 +430,7 @@ def _resolve_slots_for_day_or_next(day_pref: str) -> list[dict]:
         use_next = candidate >= _next_weeks_monday()
         slots    = sm.get_available_slots_for_day(day_name, next_week=use_next)
         if candidate == today:
-            slots = [s for s in slots if s["start_time"] > now_str]
+            slots = [s for s in slots if s["start_time"] >= cutoff_str]
         if slots:
             return [{**s, "date": candidate.isoformat(), "use_next_week": use_next} for s in slots]
     return []

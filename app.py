@@ -315,7 +315,6 @@ def _handle_parent_response_inner():
         # The filler buys ~1-1.5s — enough for Groq to finish.
         return f"""<?xml version="1.0" encoding="UTF-8"?>
 <Response>
-    <Say voice="Polly.Aditi" language="en-IN">Mm-hmm.</Say>
     <Pause length="1"/>
     <Redirect method="POST">{ngrok}/ai-response?CallSid={call_sid}</Redirect>
 </Response>""", 200, {'Content-Type': 'text/xml'}
