@@ -290,21 +290,73 @@ def _handle_parent_response_inner():
     <Say voice="Polly.Aditi" language="en-IN">I'm sorry, there was a technical issue. Please contact the college at {phone}. Goodbye.</Say>
 </Response>""", 200, {'Content-Type': 'text/xml'}
 
-    # ── Delegate to voice service ─────────────────────────────────
+    # ── Delegate to voice service (bridge pattern for low latency) ──
     if hasattr(voice, 'generate_followup_twiml'):
-        try:
-            twiml = voice.generate_followup_twiml(registration, parent_speech)
-            return twiml, 200, {'Content-Type': 'text/xml'}
-        except Exception:
-            traceback.print_exc()
-            return f"""<?xml version="1.0" encoding="UTF-8"?>
+        ngrok = os.getenv('NGROK_URL', '')
+
+        # Start computing Groq's reply in a background thread immediately
+        def _compute():
+            try:
+                result = voice.generate_followup_twiml(registration, parent_speech)
+                _pending_responses[call_sid] = result
+            except Exception:
+                traceback.print_exc()
+                err = f"""<?xml version="1.0" encoding="UTF-8"?>
 <Response>
     <Say voice="Polly.Aditi" language="en-IN">I'm sorry, there's a technical issue on our end. Please call us at {phone}. Goodbye.</Say>
+</Response>"""
+                _pending_responses[call_sid] = err
+
+        import threading
+        threading.Thread(target=_compute, daemon=True).start()
+
+        # Immediately return a filler: Polly says a short acknowledgement,
+        # then Twilio hits /ai-response where the real reply is waiting.
+        # The filler buys ~1-1.5s — enough for Groq to finish.
+        return f"""<?xml version="1.0" encoding="UTF-8"?>
+<Response>
+    <Say voice="Polly.Aditi" language="en-IN">Mm-hmm.</Say>
+    <Pause length="1"/>
+    <Redirect method="POST">{ngrok}/ai-response?CallSid={call_sid}</Redirect>
 </Response>""", 200, {'Content-Type': 'text/xml'}
 
     return f"""<?xml version="1.0" encoding="UTF-8"?>
 <Response>
     <Say voice="Polly.Aditi" language="en-IN">Thank you. Please contact the college at {phone}. Goodbye.</Say>
+</Response>""", 200, {'Content-Type': 'text/xml'}
+
+
+
+# ── AI Response Bridge (latency fix) ──────────────────────────
+# How it works:
+#   1. /handle-parent-response receives speech, kicks off Groq in a
+#      background thread, and immediately returns a short filler TwiML.
+#   2. Twilio plays the filler (~1s), then hits /ai-response to fetch
+#      the real answer — which is usually ready by then.
+# This makes the 2-3s gap invisible to the parent.
+
+_pending_responses: dict[str, str] = {}   # call_sid -> pre-computed TwiML
+
+@app.route('/ai-response', methods=['POST'])
+def ai_response():
+    """Second webhook: deliver the pre-computed Groq reply."""
+    call_sid = request.form.get('CallSid', '')
+    phone    = os.getenv('SCHOOL_PHONE', '033-4805-1910')
+
+    twiml = _pending_responses.pop(call_sid, None)
+
+    if twiml:
+        print(f"   [Bridge] Delivering cached reply for {call_sid}")
+        return twiml, 200, {'Content-Type': 'text/xml'}
+
+    # Groq wasn't ready yet — give it one more second then redirect back
+    # (rare: only if Groq took >2s)
+    ngrok = os.getenv('NGROK_URL', '')
+    print(f"   [Bridge] Reply not ready for {call_sid} — redirecting")
+    return f"""<?xml version="1.0" encoding="UTF-8"?>
+<Response>
+    <Pause length="1"/>
+    <Redirect method="POST">{ngrok}/ai-response</Redirect>
 </Response>""", 200, {'Content-Type': 'text/xml'}
 
 

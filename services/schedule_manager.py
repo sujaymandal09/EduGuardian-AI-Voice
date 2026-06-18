@@ -1,7 +1,9 @@
 """
 services/schedule_manager.py
 ─────────────────────────────
-Manages teacher meeting slots for EduGuardian.
+Production PostgreSQL Database Scheduling Engine.
+Handles atomic locks, real dates, and risk-based load balancing.
+(Updated with explicit Postgres Type Casting)
 """
 
 import csv
@@ -9,293 +11,195 @@ import logging
 import os
 from datetime import date, datetime, timedelta
 from typing import Optional
+import psycopg2.extras
+from services.database import _get_conn
 
 logger = logging.getLogger(__name__)
 
-CSV_PATH        = os.path.join("data", "meeting_slots.csv")
 WEEKLY_CSV_PATH = os.path.join("data", "Weekly_Schedule.csv")
-
 DAYS = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"]
-
-DAY_INDEX = {
-    "monday": 0, "tuesday": 1, "wednesday": 2,
-    "thursday": 3, "friday": 4, "saturday": 5, "sunday": 6,
-}
-
+DAY_INDEX = {d.lower(): i for i, d in enumerate(DAYS)}
+DAY_INDEX["sunday"] = 6
 
 def _this_weeks_monday(ref: date = None) -> date:
     ref = ref or date.today()
     return ref - timedelta(days=ref.weekday())
 
-
 def _next_weeks_monday(ref: date = None) -> date:
     return _this_weeks_monday(ref) + timedelta(weeks=1)
 
-
 def _normalise_time(t: str) -> str:
     parts = t.strip().split(":")
-    if len(parts) != 2:
-        return t.strip()
-    hour   = int(parts[0])
+    if len(parts) != 2: return t.strip()
+    hour = int(parts[0])
     minute = parts[1].strip().zfill(2)
-    if 1 <= hour <= 7:
-        hour += 12
+    if 1 <= hour <= 7: hour += 12
     return f"{hour:02d}:{minute}"
 
-
-def sync_from_weekly_csv(
-    weekly_path: str = WEEKLY_CSV_PATH,
-    slots_path:  str = CSV_PATH,
-) -> None:
+def sync_from_weekly_csv(weekly_path: str = WEEKLY_CSV_PATH) -> None:
+    """Reads the CSV template and projects it 30 days into the future in the DB."""
     if not os.path.exists(weekly_path):
-        logger.warning(f"[ScheduleManager] Weekly_Schedule.csv not found: {weekly_path}")
+        logger.warning(f"[ScheduleManager] {weekly_path} not found.")
         return
 
-    existing: dict[tuple, dict] = {}
-    if os.path.exists(slots_path):
-        try:
-            with open(slots_path, "r", encoding="utf-8", newline="") as f:
-                for row in csv.DictReader(f):
-                    key = (row["day"].strip(), row["start_time"].strip())
-                    existing[key] = row
-        except Exception as e:
-            logger.error(f"[ScheduleManager] Could not read existing slots: {e}")
+    template = {d: [] for d in DAYS}
+    with open(weekly_path, "r", encoding="utf-8-sig", newline="") as f:
+        for raw_row in csv.DictReader(f):
+            time_range = raw_row.get("Time", "").strip()
+            if not time_range or " - " not in time_range: continue
+            start, end = [p.strip() for p in time_range.split(" - ")]
+            start_t, end_t = _normalise_time(start), _normalise_time(end)
 
-    today_monday = _this_weeks_monday().isoformat()
-    new_rows: list[dict] = []
+            for day in DAYS:
+                if raw_row.get(day, "").strip().upper() == "FREE":
+                    template[day].append({"start": start_t, "end": end_t, "cap": 1})
 
     try:
-        with open(weekly_path, "r", encoding="utf-8-sig", newline="") as f:
-            reader = csv.DictReader(f)
-            for raw_row in reader:
-                time_range = raw_row.get("Time", "").strip()
-                if not time_range:
-                    continue
-                parts = [p.strip() for p in time_range.split(" - ")]
-                if len(parts) != 2:
-                    continue
-                start_time = _normalise_time(parts[0])
-                end_time   = _normalise_time(parts[1])
-
-                for day in DAYS:
-                    cell = raw_row.get(day, "").strip().upper()
-                    if cell != "FREE":
-                        continue
-                    key = (day, start_time)
-                    old = existing.get(key, {})
-                    new_rows.append({
-                        "day":                   day,
-                        "start_time":            start_time,
-                        "end_time":              end_time,
-                        "total_capacity":        old.get("total_capacity",        "1"),
-                        "current_week_bookings": old.get("current_week_bookings", "0"),
-                        "next_week_bookings":    old.get("next_week_bookings",    "0"),
-                        "week_start_date":       old.get("week_start_date",       today_monday),
-                    })
+        with _get_conn() as conn:
+            with conn.cursor() as cur:
+                for offset in range(30):
+                    target = date.today() + timedelta(days=offset)
+                    day_name = target.strftime("%A")
+                    for slot in template.get(day_name, []):
+                        # Explicitly cast %s::date and %s::time to prevent Postgres Operator errors
+                        cur.execute("""
+                            INSERT INTO schedule_availability (slot_date, day_of_week, start_time, end_time, capacity)
+                            VALUES (%s::date, %s, %s::time, %s::time, %s)
+                            ON CONFLICT (slot_date, start_time) DO NOTHING
+                        """, (target, day_name, slot["start"], slot["end"], slot["cap"]))
+        logger.info("[ScheduleManager] Synced 30-day rolling schedule to DB.")
     except Exception as e:
-        logger.error(f"[ScheduleManager] sync_from_weekly_csv read error: {e}")
-        return
-
-    day_order = {d: i for i, d in enumerate(DAYS)}
-    new_rows.sort(key=lambda r: (day_order.get(r["day"], 99), r["start_time"]))
-
-    if not new_rows:
-        logger.warning("[ScheduleManager] No FREE slots found in Weekly_Schedule.csv")
-        return
-
-    fieldnames = ["day", "start_time", "end_time", "total_capacity",
-                  "current_week_bookings", "next_week_bookings", "week_start_date"]
-    try:
-        with open(slots_path, "w", encoding="utf-8", newline="") as f:
-            writer = csv.DictWriter(f, fieldnames=fieldnames)
-            writer.writeheader()
-            writer.writerows(new_rows)
-        logger.info(f"[ScheduleManager] Synced {len(new_rows)} FREE slots")
-    except Exception as e:
-        logger.error(f"[ScheduleManager] sync_from_weekly_csv write error: {e}")
-
+        logger.error(f"[ScheduleManager] DB sync failed: {e}")
 
 class ScheduleManager:
-
-    def __init__(self, csv_path: str = CSV_PATH):
-        self.csv_path = csv_path
-
-    # ── Public API ─────────────────────────────────────────────────
-
     def reset_week_if_needed(self) -> None:
-        rows = self._load()
-        if not rows:
-            return
+        pass 
 
-        stored_monday_str = rows[0].get("week_start_date", "")
-        this_monday       = _this_weeks_monday()
-
-        try:
-            stored_monday = date.fromisoformat(stored_monday_str)
-        except ValueError:
-            stored_monday = None
-
-        if stored_monday == this_monday:
-            return
-
-        logger.info(f"[ScheduleManager] New week — rolling over: {stored_monday_str} → {this_monday}")
-        for row in rows:
-            row["current_week_bookings"] = row["next_week_bookings"]
-            row["next_week_bookings"]    = "0"
-            row["week_start_date"]       = this_monday.isoformat()
-        self._save(rows)
-
-    def get_next_available_slot(self, prefer_next_week: bool = False) -> Optional[dict]:
-        """
-        Return the nearest free slot.
-
-        prefer_next_week=True  → start scanning from next Monday (not today).
-                                  Used when parent says 'next week'.
-        prefer_next_week=False → start from today/tomorrow as normal.
-
-        FIX: previously, prefer_next_week=True still started from today,
-        which meant it could return a slot from the current week while
-        incorrectly incrementing the next_week_bookings counter.
-        """
-        rows  = self._load()
+    def _resolve_date(self, day_name: str, date_iso: str = None, next_week: bool = False) -> date:
+        if date_iso: return date.fromisoformat(date_iso)
         today = date.today()
-        now_str = datetime.now().strftime("%H:%M")
+        days_ahead = (DAY_INDEX.get(day_name.lower(), 0) - today.weekday()) % 7
+        if days_ahead == 0 and next_week: days_ahead = 7
+        elif days_ahead == 0 and not next_week: days_ahead = 0
+        target = today + timedelta(days=days_ahead)
+        if next_week and target < _next_weeks_monday():
+            target += timedelta(weeks=1)
+        return target
 
-        if prefer_next_week:
-            # Always start from next Monday — never return a slot from this week
-            start            = _next_weeks_monday()
-            prefer_next_week = True   # keep True so booking_col stays next_week_bookings
-        elif today.weekday() == 5:    # Today is Saturday → next slot is Monday next week
-            start            = today + timedelta(days=2)
-            prefer_next_week = True
+    def get_available_slots_for_day(self, day_name: str, next_week: bool = False, risk_level: str = "MEDIUM", date_iso: str = None) -> list[dict]:
+        target_date = self._resolve_date(day_name, date_iso, next_week)
+        
+        with _get_conn() as conn:
+            with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+                cur.execute("""
+                    SELECT id, day_of_week as day, 
+                           TO_CHAR(start_time, 'HH24:MI') as start_time,
+                           TO_CHAR(end_time, 'HH24:MI') as end_time,
+                           capacity,
+                           (SELECT count(*) FROM schedule_bookings b 
+                            WHERE b.availability_id = schedule_availability.id 
+                            AND b.status = 'CONFIRMED') as booked
+                    FROM schedule_availability
+                    WHERE slot_date = %s::date
+                """, (target_date,))
+                rows = cur.fetchall()
+
+        slots = []
+        for r in rows:
+            if r['booked'] < r['capacity']:
+                slots.append({
+                    "day": r['day'], "start_time": r['start_time'], "end_time": r['end_time'],
+                    "use_next_week": next_week, "date": target_date.isoformat(),
+                    "available_spots": r['capacity'] - r['booked']
+                })
+
+        if risk_level.upper() == "HIGH":
+            slots.sort(key=lambda x: x["start_time"])
         else:
-            start = today
+            slots.sort(key=lambda x: (-x["available_spots"], x["start_time"]))
 
-        for offset in range(14):     # scan up to 2 weeks ahead
-            candidate = start + timedelta(days=offset)
-            if candidate.weekday() == 6:   # skip Sunday
-                continue
-
-            day_name    = candidate.strftime("%A")
-            is_today    = (candidate == today)
-            use_next    = prefer_next_week or (candidate >= _next_weeks_monday())
-            booking_col = "next_week_bookings" if use_next else "current_week_bookings"
-
-            for row in rows:
-                if row["day"].strip().lower() != day_name.lower():
-                    continue
-                if is_today and row["start_time"].strip() <= now_str:
-                    continue
-                booked   = int(row[booking_col])
-                capacity = int(row["total_capacity"])
-                if booked < capacity:
-                    return {
-                        "day":          day_name,
-                        "start_time":   row["start_time"],
-                        "end_time":     row["end_time"],
-                        "use_next_week": use_next,
-                        "date":         candidate.isoformat(),
-                    }
-        return None
-
-    def get_today_available_slot(self) -> Optional[dict]:
-        rows    = self._load()
-        today   = date.today()
-        day_name = today.strftime("%A")
-        now_str  = datetime.now().strftime("%H:%M")
-
-        for row in rows:
-            if row["day"].strip().lower() != day_name.lower():
-                continue
-            if row["start_time"].strip() <= now_str:
-                continue
-            booked   = int(row["current_week_bookings"])
-            capacity = int(row["total_capacity"])
-            if booked < capacity:
-                return {
-                    "day":          day_name,
-                    "start_time":   row["start_time"],
-                    "end_time":     row["end_time"],
-                    "use_next_week": False,
-                    "date":         today.isoformat(),
-                }
-        return None
-
-    def get_available_slots_for_day(self, day_name: str, next_week: bool = False) -> list[dict]:
-        rows        = self._load()
-        booking_col = "next_week_bookings" if next_week else "current_week_bookings"
-        slots       = []
-        for row in rows:
-            if row["day"].strip().lower() == day_name.strip().lower():
-                booked   = int(row[booking_col])
-                capacity = int(row["total_capacity"])
-                if booked < capacity:
-                    slots.append({
-                        "day":          row["day"],
-                        "start_time":   row["start_time"],
-                        "end_time":     row["end_time"],
-                        "use_next_week": next_week,
-                    })
         return slots
 
-    def book_slot(self, day: str, start_time: str, next_week: bool = False) -> bool:
-        rows        = self._load()
-        booking_col = "next_week_bookings" if next_week else "current_week_bookings"
-        for row in rows:
-            if (row["day"].strip().lower()  == day.strip().lower()
-                    and row["start_time"].strip() == start_time.strip()):
-                booked   = int(row[booking_col])
-                capacity = int(row["total_capacity"])
+    def get_today_available_slot(self, risk_level: str = "MEDIUM") -> Optional[dict]:
+        today_str = date.today().isoformat()
+        now_str = (datetime.now() + timedelta(hours=2)).strftime("%H:%M") 
+        slots = self.get_available_slots_for_day(date.today().strftime("%A"), date_iso=today_str, risk_level=risk_level)
+        slots = [s for s in slots if s["start_time"] > now_str]
+        return slots[0] if slots else None
+
+    def get_next_available_slot(self, prefer_next_week: bool = False, risk_level: str = "MEDIUM") -> Optional[dict]:
+        start = _next_weeks_monday() if prefer_next_week else date.today()
+        if date.today().weekday() == 5 and not prefer_next_week: start += timedelta(days=2) 
+        
+        now_str = (datetime.now() + timedelta(hours=2)).strftime("%H:%M")
+
+        for offset in range(14):
+            candidate = start + timedelta(days=offset)
+            if candidate.weekday() == 6: continue 
+            
+            slots = self.get_available_slots_for_day(candidate.strftime("%A"), date_iso=candidate.isoformat(), risk_level=risk_level)
+            if candidate == date.today():
+                slots = [s for s in slots if s["start_time"] > now_str]
+            if slots:
+                return slots[0] 
+        return None
+
+    def book_slot(self, day: str, start_time: str, registration: str, date_iso: str = None, next_week: bool = False) -> bool:
+        target_date = self._resolve_date(day, date_iso, next_week)
+
+        with _get_conn() as conn:
+            with conn.cursor() as cur:
+                # Step 1: Lock the availability row so no other request can
+                # read or write it until this transaction commits or rolls back.
+                # This is the key fix — without FOR UPDATE, two simultaneous
+                # webhooks can both pass the capacity check and both insert.
+                cur.execute("""
+                    SELECT id, capacity
+                    FROM schedule_availability
+                    WHERE slot_date = %s::date AND start_time = %s::time
+                    FOR UPDATE
+                """, (target_date, start_time))
+                row = cur.fetchone()
+                if not row:
+                    logger.warning(f"[ScheduleManager] Slot not found: {day} {start_time} on {target_date}")
+                    return False
+
+                availability_id, capacity = row
+
+                # Step 2: Count confirmed bookings while we hold the lock
+                cur.execute("""
+                    SELECT count(*) FROM schedule_bookings
+                    WHERE availability_id = %s AND status = 'CONFIRMED'
+                """, (availability_id,))
+                booked = cur.fetchone()[0]
+
                 if booked >= capacity:
-                    logger.warning(f"[ScheduleManager] Slot {day} {start_time} already full.")
+                    logger.warning(f"[ScheduleManager] Slot full: {day} {start_time} on {target_date} ({booked}/{capacity})")
                     return False
-                row[booking_col] = str(booked + 1)
-                self._save(rows)
-                logger.info(f"[ScheduleManager] Booked: {day} {start_time} "
-                            f"({'next' if next_week else 'current'} week)")
-                return True
-        logger.warning(f"[ScheduleManager] Slot not found: {day} {start_time}")
-        return False
 
-    def cancel_slot(self, day: str, start_time: str, next_week: bool = False) -> bool:
-        rows        = self._load()
-        booking_col = "next_week_bookings" if next_week else "current_week_bookings"
-        for row in rows:
-            if (row["day"].strip().lower()  == day.strip().lower()
-                    and row["start_time"].strip() == start_time.strip()):
-                booked = int(row[booking_col])
-                if booked <= 0:
-                    logger.warning(f"[ScheduleManager] Cannot cancel {day} {start_time} — already at 0.")
-                    return False
-                row[booking_col] = str(booked - 1)
-                self._save(rows)
-                logger.info(f"[ScheduleManager] Cancelled: {day} {start_time} "
-                            f"({'next' if next_week else 'current'} week)")
-                return True
-        logger.warning(f"[ScheduleManager] Cancel: slot not found: {day} {start_time}")
-        return False
+                # Step 3: Safe to insert — we hold the lock
+                cur.execute("""
+                    INSERT INTO schedule_bookings (availability_id, registration, status)
+                    VALUES (%s, %s, 'CONFIRMED')
+                    RETURNING id
+                """, (availability_id, registration))
+                if cur.fetchone():
+                    logger.info(f"[ScheduleManager] Confirmed DB booking for {registration} on {target_date} at {start_time}")
+                    return True
+                return False
 
-    # ── Internal ───────────────────────────────────────────────────
-
-    def _load(self) -> list[dict]:
-        if not os.path.exists(self.csv_path):
-            logger.error(f"[ScheduleManager] CSV not found: {self.csv_path}")
-            return []
-        try:
-            with open(self.csv_path, "r", encoding="utf-8", newline="") as f:
-                return list(csv.DictReader(f))
-        except Exception as e:
-            logger.error(f"[ScheduleManager] Load error: {e}")
-            return []
-
-    def _save(self, rows: list[dict]) -> None:
-        if not rows:
-            return
-        fieldnames = list(rows[0].keys())
-        try:
-            with open(self.csv_path, "w", encoding="utf-8", newline="") as f:
-                writer = csv.DictWriter(f, fieldnames=fieldnames)
-                writer.writeheader()
-                writer.writerows(rows)
-        except Exception as e:
-            logger.error(f"[ScheduleManager] Save error: {e}")
+    def cancel_slot(self, day: str, start_time: str, registration: str, date_iso: str = None, next_week: bool = False) -> bool:
+        target_date = self._resolve_date(day, date_iso, next_week)
+        with _get_conn() as conn:
+            with conn.cursor() as cur:
+                # Explicitly cast %s::date and %s::time
+                cur.execute("""
+                    UPDATE schedule_bookings SET status = 'CANCELLED'
+                    WHERE registration = %s AND status = 'CONFIRMED'
+                    AND availability_id = (
+                        SELECT id FROM schedule_availability 
+                        WHERE slot_date = %s::date AND start_time = %s::time 
+                        LIMIT 1
+                    )
+                """, (registration, target_date, start_time))
+                return cur.rowcount > 0
