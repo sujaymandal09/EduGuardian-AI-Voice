@@ -49,6 +49,7 @@ class CallPayload:
     details: str
     recommended_action: str = ""
     language: str = "en"
+    teacher_id: str = "default"
     # Student academic data (populated from CSV for AI context)
     attendance_pct: Optional[float] = None
     attendance_total: Optional[int] = None

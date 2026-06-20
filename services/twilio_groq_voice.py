@@ -6,9 +6,16 @@ services/twilio_groq_voice.py
 import html
 import logging
 import os
+import re
 import time
-from groq import Groq
+from dataclasses import dataclass
+from datetime import date as calendar_date, datetime, time as clock_time, timedelta
+try:
+    from groq import Groq
+except ImportError:  # Calendar and demo mode can run without the AI dependency.
+    Groq = None
 from core.models import CallPayload, NotificationResult
+from services.calendar_service import CalendarService, CalendarSlot, create_calendar_service
 
 logger = logging.getLogger(__name__)
 
@@ -21,6 +28,8 @@ STAGE_INTRO        = "intro"         # Just confirmed who they are
 STAGE_AVAILABILITY = "availability"  # Asked if free — waiting for answer
 STAGE_CONVERSATION = "conversation"  # Main discussion happening
 STAGE_SOLUTION     = "solution"      # Advice / meeting suggested
+STAGE_MEETING      = "meeting"       # Waiting for a verified slot choice
+STAGE_RESCHEDULE   = "reschedule"    # Waiting for a replacement date or time
 STAGE_FAREWELL     = "farewell"      # Asked "anything else?" — waiting for final answer
 STAGE_CLOSING      = "closing"       # Wrapping up
 
@@ -79,6 +88,184 @@ def _parent_wants_to_end(speech: str, stage: str) -> bool:
     return False
 
 
+def _join_spoken_slots(slots: list[CalendarSlot]) -> str:
+    labels = [slot.spoken() for slot in slots]
+    if len(labels) == 1:
+        return labels[0]
+    return ", ".join(labels[:-1]) + f", or {labels[-1]}"
+
+
+def _working_days_label(days: frozenset[int]) -> str:
+    names = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]
+    selected = [names[index] for index in sorted(days)]
+    if selected == names[:5]:
+        return "Monday through Friday"
+    if len(selected) == 1:
+        return f"on {selected[0]}"
+    return "on " + ", ".join(selected[:-1]) + f", and {selected[-1]}"
+
+
+def _declines_meeting(speech: str) -> bool:
+    text = speech.lower()
+    return any(phrase in text for phrase in (
+        "no meeting", "don't want", "do not want", "none of those",
+        "not this week", "can't meet", "cannot meet",
+    ))
+
+
+def _wants_to_reschedule(speech: str) -> bool:
+    text = speech.lower()
+    action = re.search(r"\b(?:re[- ]?schedul\w*|shift\w*|mov(?:e|ed|ing)|chang(?:e|ed|ing))\b", text)
+    if action:
+        return True
+    if re.search(r"\b(?:instead|another\s+(?:time|slot|day)|different\s+(?:time|slot|day))\b", text):
+        return True
+    return bool(re.search(
+        r"\b(?:make|do)\s+(?:the\s+meeting\s+|it\s+|that\s+)?(?:for\s+|at\s+)?"
+        r"(?:\d{1,2}(?::\d{2})?|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve)\b",
+        text,
+    ))
+
+
+def _wants_to_cancel(speech: str) -> bool:
+    text = speech.lower()
+    return any(phrase in text for phrase in (
+        "cancel the meeting", "cancel my meeting", "cancel our meeting",
+        "delete the meeting", "remove the meeting", "can't attend the meeting",
+        "cannot attend the meeting",
+    ))
+
+
+@dataclass(frozen=True)
+class ParsedMeetingRequest:
+    date: calendar_date | None = None
+    time: clock_time | None = None
+
+
+def _parse_meeting_request(speech: str, timezone, now: datetime | None = None) -> ParsedMeetingRequest:
+    text = speech.lower().strip()
+    today = (now or datetime.now(timezone)).astimezone(timezone).date()
+    requested_date = None
+
+    iso = re.search(r"\b(20\d{2})-(\d{1,2})-(\d{1,2})\b", text)
+    numeric_date = re.search(r"\b(\d{1,2})[/-](\d{1,2})[/-](20\d{2})\b", text)
+    months = {
+        "january": 1, "february": 2, "march": 3, "april": 4,
+        "may": 5, "june": 6, "july": 7, "august": 8,
+        "september": 9, "october": 10, "november": 11, "december": 12,
+    }
+    month_names = "|".join(months)
+    month_first = re.search(
+        rf"\b({month_names})\s+(\d{{1,2}})(?:st|nd|rd|th)?(?:,?\s+(20\d{{2}}))?\b", text
+    )
+    day_first = re.search(
+        rf"\b(\d{{1,2}})(?:st|nd|rd|th)?\s+({month_names})(?:\s+(20\d{{2}}))?\b", text
+    )
+
+    try:
+        if iso:
+            requested_date = calendar_date(int(iso.group(1)), int(iso.group(2)), int(iso.group(3)))
+        elif numeric_date:
+            requested_date = calendar_date(
+                int(numeric_date.group(3)), int(numeric_date.group(2)), int(numeric_date.group(1))
+            )
+        elif month_first or day_first:
+            if month_first:
+                month, day, year = months[month_first.group(1)], int(month_first.group(2)), month_first.group(3)
+            else:
+                month, day, year = months[day_first.group(2)], int(day_first.group(1)), day_first.group(3)
+            requested_date = calendar_date(int(year or today.year), month, day)
+            if not year and requested_date < today:
+                requested_date = requested_date.replace(year=today.year + 1)
+        elif "day after tomorrow" in text:
+            requested_date = today + timedelta(days=2)
+        elif "tomorrow" in text:
+            requested_date = today + timedelta(days=1)
+        elif "today" in text:
+            requested_date = today
+        else:
+            weekdays = ["monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday"]
+            for weekday, name in enumerate(weekdays):
+                if re.search(rf"\b{name}\b", text):
+                    distance = (weekday - today.weekday()) % 7
+                    if "next " + name in text and distance == 0:
+                        distance = 7
+                    requested_date = today + timedelta(days=distance)
+                    break
+    except ValueError:
+        requested_date = None
+
+    requested_time = None
+    time_match = (
+        re.search(r"\b(?:at|around|from|by)\s+(\d{1,2})(?:[:.](\d{2}))?\s*(a\.?m\.?|p\.?m\.?)?\b", text)
+        or re.search(r"\b(\d{1,2})[:.](\d{2})\s*(a\.?m\.?|p\.?m\.?)?\b", text)
+        or re.search(r"\b(\d{1,2})\s*(a\.?m\.?|p\.?m\.?)\b", text)
+    )
+    if time_match:
+        groups = time_match.groups()
+        hour = int(groups[0])
+        minute = int(groups[1]) if len(groups) > 2 and groups[1] else 0
+        meridiem = (groups[-1] or "").replace(".", "")
+        if meridiem == "pm" and hour < 12:
+            hour += 12
+        elif meridiem == "am" and hour == 12:
+            hour = 0
+        if 0 <= hour <= 23 and 0 <= minute <= 59:
+            requested_time = clock_time(hour, minute)
+    else:
+        word_hours = {
+            "twelve": 12, "one": 1, "two": 2, "three": 3, "four": 4,
+            "five": 5, "six": 6, "seven": 7, "eight": 8, "nine": 9,
+            "ten": 10, "eleven": 11,
+        }
+        word_match = re.search(
+            r"\b(?:at|around|from|by)\s+(" + "|".join(word_hours) + r")\b", text
+        )
+        if word_match:
+            hour = word_hours[word_match.group(1)]
+            if "pm" in text and hour < 12:
+                hour += 12
+            requested_time = clock_time(hour, 30 if "thirty" in text else 0)
+
+    return ParsedMeetingRequest(requested_date, requested_time)
+
+
+def _match_requested_slot(
+    speech: str,
+    offered: list[CalendarSlot],
+    timezone,
+    duration: timedelta,
+) -> CalendarSlot | None:
+    text = speech.lower().strip()
+    ordinal_words = {"first": 0, "second": 1, "third": 2}
+    for word, index in ordinal_words.items():
+        if re.search(rf"\b{word}\b", text) and index < len(offered):
+            return offered[index]
+    numeric_choice = re.search(r"(?:option\s+([123])|\b([123])(?:st|nd|rd)\b)", text)
+    if numeric_choice:
+        index = int(numeric_choice.group(1) or numeric_choice.group(2)) - 1
+        if index < len(offered):
+            return offered[index]
+
+    parsed = _parse_meeting_request(speech, timezone)
+    requested_date = parsed.date
+    hour = parsed.time.hour if parsed.time else None
+    minute = parsed.time.minute if parsed.time else None
+
+    candidates = offered
+    if requested_date:
+        candidates = [slot for slot in candidates if slot.start.date() == requested_date]
+    if hour is not None:
+        candidates = [slot for slot in candidates if slot.start.hour == hour and slot.start.minute == minute]
+    if len(candidates) == 1:
+        return candidates[0]
+
+    if requested_date and hour is not None:
+        start = datetime.combine(requested_date, datetime.min.time(), timezone).replace(hour=hour, minute=minute)
+        return CalendarSlot(start, start + duration)
+    return None
+
+
 # ─────────────────────────────────────────────────────────────────
 #  SYSTEM PROMPT
 # ─────────────────────────────────────────────────────────────────
@@ -91,8 +278,8 @@ def _build_counselor_prompt(school, phone, student_name, parent_name,
         "HIGH": f"""
 RESOLUTION (HIGH risk):
 - A face-to-face meeting is essential. Propose it firmly but warmly.
-- Suggest tomorrow at 10 AM as the first option.
-- If unavailable, accept any time this week — but make clear it is important.
+- Ask whether the parent would like you to check the teacher's calendar.
+- If they agree, let the application offer verified openings.
 - Do NOT accept monitoring alone as the outcome for a high-risk case.
 """,
         "MEDIUM": f"""
@@ -180,13 +367,13 @@ Details (USE ONLY THESE FACTS): {details}
     meeting_rules = {
         "HIGH": """
 MEETING RULES (HIGH risk):
-- Suggest tomorrow at 10 AM.
+- Ask whether the parent would like to meet.
 - If parent says not available: persuade ONCE warmly — like a caring teacher.
   Example: "I completely understand. I just want to mention that the situation
   is quite urgent and the sooner we can meet, the better it will be for your child.
   Is there any possibility this week at all?"
-- After that ONE gentle push, IMMEDIATELY accept whatever time they give.
-- Confirm their date warmly and move to farewell.
+- After that ONE gentle push, respect their decision.
+- If they agree, use [CHECK_AVAILABILITY] and let the application offer times.
 """,
         "MEDIUM": """
 MEETING RULES (MEDIUM risk):
@@ -199,7 +386,7 @@ MEETING RULES (LOW risk):
 - No meeting needed. Close with encouragement.
 - Offer the school contact number so parents can reach out if they want.
 """,
-    }.get(risk_level.upper(), "Suggest meeting if helpful. Accept whatever time parent proposes.")
+    }.get(risk_level.upper(), "Suggest a meeting if helpful, but never invent an available time.")
 
     return f"""You are Priya — a warm, experienced school counselor calling from {school}.
 You are speaking with {parent_name}, parent of {student_name}.
@@ -273,6 +460,14 @@ STRICT RULES:
    [END_CALL]  — end now (only after farewell step 2 is complete)
 8. Tag is for system only — never spoken aloud.
 
+MEETING TOOL:
+- When the parent agrees to a meeting or asks for available times, add
+  [CHECK_AVAILABILITY] on its own line.
+- Never state or confirm a meeting date or time yourself. Only the application
+  can check the teacher's calendar and confirm a booking.
+- Never claim that a meeting was rescheduled or cancelled. The application must
+  update the calendar event before that change can be confirmed.
+
 You are in a REAL phone call. React naturally. Be human. Speak English only.
 """.strip()
 
@@ -289,6 +484,10 @@ class ConversationState:
         self.turn_count     = 0
         self.stage          = STAGE_INTRO    # starts at intro
         self.messages: list[dict] = []
+        self.offered_slots: list[CalendarSlot] = []
+        self.booking = None
+        self.pending_meeting_date: calendar_date | None = None
+        self.pending_meeting_time: clock_time | None = None
         self.system_prompt  = _build_counselor_prompt(
             school=school,
             phone=phone,
@@ -303,7 +502,7 @@ class ConversationState:
     def advance_stage(self):
         """Move stage forward based on turn count as a rough heuristic."""
         # STAGE_FAREWELL and STAGE_CLOSING are set explicitly — never overwrite them here
-        if self.stage in (STAGE_FAREWELL, STAGE_CLOSING):
+        if self.stage in (STAGE_MEETING, STAGE_RESCHEDULE, STAGE_FAREWELL, STAGE_CLOSING):
             return
         if self.stage == STAGE_INTRO and self.turn_count >= 1:
             self.stage = STAGE_AVAILABILITY
@@ -320,7 +519,7 @@ class TwoWayAIVoiceService:
     MODEL = "llama-3.1-8b-instant"
     MAX_HISTORY = 12
 
-    def __init__(self):
+    def __init__(self, calendar_service: CalendarService | None = None):
         self._twilio_sid   = os.getenv("TWILIO_ACCOUNT_SID")
         self._twilio_token = os.getenv("TWILIO_AUTH_TOKEN")
         self._from_number  = os.getenv("TWILIO_FROM_NUMBER")
@@ -328,9 +527,10 @@ class TwoWayAIVoiceService:
         self._ngrok_url    = os.getenv("NGROK_URL", "")
         self._school       = os.getenv("SCHOOL_NAME", "Siliguri College")
         self._phone        = os.getenv("SCHOOL_PHONE", "033-4805-1910")
+        self._calendar     = calendar_service or create_calendar_service()
 
         self._twilio_ready = all([self._twilio_sid, self._twilio_token, self._from_number])
-        self._ai_ready     = bool(self._groq_key)
+        self._ai_ready     = bool(self._groq_key and Groq)
 
         if self._twilio_ready:
             from twilio.rest import Client
@@ -385,13 +585,187 @@ class TwoWayAIVoiceService:
         return ai_text
 
     # ── Parse control tag ─────────────────────────────────────────
-    def _parse_reply(self, ai_text: str) -> tuple[str, bool]:
+    def _parse_reply(self, ai_text: str) -> tuple[str, bool, bool]:
         end_call = "[END_CALL]" in ai_text
+        check_availability = "[CHECK_AVAILABILITY]" in ai_text
         spoken = (ai_text
                   .replace("[END_CALL]", "")
                   .replace("[CONTINUE]", "")
+                  .replace("[CHECK_AVAILABILITY]", "")
                   .strip())
-        return spoken, end_call
+        return spoken, end_call, check_availability
+
+    def _offer_available_slots(
+        self, state: ConversationState, prefix: str = "", *, for_reschedule: bool = False
+    ) -> str:
+        try:
+            slots = self._calendar.find_available_slots(state.payload.teacher_id, limit=3)
+        except Exception as exc:
+            logger.error("Calendar availability error: %s", exc)
+            state.stage = STAGE_FAREWELL
+            return (
+                "I'm sorry, I can't access the teacher's calendar right now. "
+                f"Please call the school at {self._phone} and we'll arrange the meeting for you."
+            )
+        state.offered_slots = slots
+        if not slots:
+            state.stage = STAGE_FAREWELL
+            return (
+                "I checked the teacher's calendar, but there aren't any openings in the next week. "
+                f"Please call the school at {self._phone} and we'll help arrange another time."
+            )
+
+        state.stage = STAGE_RESCHEDULE if for_reschedule else STAGE_MEETING
+        choices = _join_spoken_slots(slots)
+        lead = f"{prefix.strip()} " if prefix.strip() else ""
+        return f"{lead}I checked the teacher's calendar. The available times are {choices}. Which works best for you?"
+
+    def _handle_meeting_choice(self, state: ConversationState, parent_speech: str) -> str:
+        if _declines_meeting(parent_speech):
+            state.stage = STAGE_FAREWELL
+            state.offered_slots = []
+            self._clear_pending_meeting_request(state)
+            return "Of course, I understand. Is there anything else you'd like to discuss?"
+
+        slot = self._requested_slot_with_context(state, parent_speech)
+        if not slot:
+            return self._clarify_meeting_request(state, parent_speech)
+
+        policy_error = self._slot_policy_error(slot)
+        if policy_error:
+            choices = _join_spoken_slots(state.offered_slots[:2])
+            return f"{policy_error} The next available options are {choices}. Which would you prefer?"
+
+        try:
+            booking = self._calendar.book_meeting(
+                state.payload.teacher_id,
+                slot,
+                student_name=state.payload.student_name,
+                parent_name=state.payload.parent_name,
+                reason=state.payload.dimension,
+            )
+        except ValueError:
+            return self._offer_available_slots(
+                state, "That time was just taken, so I've refreshed the calendar."
+            )
+        except Exception as exc:
+            logger.error("Calendar booking error: %s", exc)
+            state.stage = STAGE_FAREWELL
+            return (
+                "I'm sorry, I couldn't complete the booking just now. "
+                f"Please call the school at {self._phone} and we'll reserve it for you."
+            )
+
+        state.booking = booking
+        state.offered_slots = []
+        self._clear_pending_meeting_request(state)
+        state.stage = STAGE_FAREWELL
+        return f"Your meeting is booked for {slot.spoken()}. Is there anything else I can help with?"
+
+    def _handle_reschedule(self, state: ConversationState, parent_speech: str) -> str:
+        slot = self._requested_slot_with_context(state, parent_speech)
+        if not slot:
+            state.stage = STAGE_RESCHEDULE
+            return self._clarify_meeting_request(state, parent_speech, action="move the meeting")
+
+        policy_error = self._slot_policy_error(slot)
+        if policy_error:
+            return self._offer_available_slots(
+                state, policy_error, for_reschedule=True
+            )
+
+        try:
+            state.booking = self._calendar.reschedule_meeting(state.booking, slot)
+        except ValueError:
+            return self._offer_available_slots(
+                state, "That requested time isn't available.", for_reschedule=True
+            )
+        except Exception as exc:
+            logger.error("Calendar reschedule error: %s", exc)
+            state.stage = STAGE_FAREWELL
+            return (
+                "I'm sorry, I couldn't update the calendar just now. "
+                f"Please call the school at {self._phone} and we'll change it for you."
+            )
+
+        state.offered_slots = []
+        self._clear_pending_meeting_request(state)
+        state.stage = STAGE_FAREWELL
+        return f"Your meeting has been moved to {slot.spoken()}. Is there anything else I can help with?"
+
+    def _handle_cancellation(self, state: ConversationState) -> str:
+        try:
+            self._calendar.cancel_meeting(state.booking)
+        except Exception as exc:
+            logger.error("Calendar cancellation error: %s", exc)
+            return (
+                "I'm sorry, I couldn't cancel the calendar event just now. "
+                f"Please call the school at {self._phone} for help."
+            )
+        state.booking = None
+        state.offered_slots = []
+        self._clear_pending_meeting_request(state)
+        state.stage = STAGE_FAREWELL
+        return "The meeting has been cancelled in the teacher's calendar. Is there anything else I can help with?"
+
+    def _clarify_meeting_request(
+        self, state: ConversationState, parent_speech: str, action: str = "schedule the meeting"
+    ) -> str:
+        parsed_now = _parse_meeting_request(parent_speech, self._calendar.timezone)
+        parsed = ParsedMeetingRequest(
+            parsed_now.date or state.pending_meeting_date,
+            parsed_now.time or state.pending_meeting_time,
+        )
+        if parsed.date and parsed.date.weekday() not in self._calendar.working_days:
+            valid_days = _working_days_label(self._calendar.working_days)
+            return f"That day is outside the teacher's working days. Meetings are available {valid_days}. Which working day would you prefer?"
+        if parsed.date and not parsed.time:
+            return f"What time on {parsed.date.strftime('%A, %B %d')} would you prefer?"
+        if parsed.time and not parsed.date:
+            clock = parsed.time.strftime("%I:%M %p").lstrip("0")
+            return f"Which working day would you prefer for {clock}?"
+        return f"What day and time would you like to {action}?"
+
+    def _requested_slot_with_context(
+        self, state: ConversationState, parent_speech: str
+    ) -> CalendarSlot | None:
+        slot = _match_requested_slot(
+            parent_speech, state.offered_slots, self._calendar.timezone,
+            self._calendar.duration,
+        )
+        if slot:
+            return slot
+        parsed = _parse_meeting_request(parent_speech, self._calendar.timezone)
+        if parsed.date:
+            state.pending_meeting_date = parsed.date
+        if parsed.time:
+            state.pending_meeting_time = parsed.time
+        if state.pending_meeting_date and state.pending_meeting_time:
+            start = datetime.combine(
+                state.pending_meeting_date, state.pending_meeting_time,
+                self._calendar.timezone,
+            )
+            return CalendarSlot(start, start + self._calendar.duration)
+        return None
+
+    @staticmethod
+    def _clear_pending_meeting_request(state: ConversationState) -> None:
+        state.pending_meeting_date = None
+        state.pending_meeting_time = None
+
+    def _slot_policy_error(self, slot: CalendarSlot) -> str | None:
+        if slot.start <= datetime.now(self._calendar.timezone):
+            return "That requested time has already passed."
+        if slot.start.weekday() not in self._calendar.working_days:
+            return f"Meetings are only available {_working_days_label(self._calendar.working_days)}."
+        if (
+            slot.start.timetz().replace(tzinfo=None) < self._calendar.meeting_start
+            or slot.end.timetz().replace(tzinfo=None) > self._calendar.meeting_end
+        ):
+            start = self._calendar.meeting_start.strftime("%I:%M %p").lstrip("0")
+            end = self._calendar.meeting_end.strftime("%I:%M %p").lstrip("0")
+            return f"Meeting times are available between {start} and {end}."
+        return None
 
     # ── Build TwiML — Say inside Gather for interruptibility ──────
     def _twiml(self, spoken: str, end_call: bool) -> str:
@@ -461,6 +835,22 @@ class TwoWayAIVoiceService:
     <Say voice="Polly.Aditi" language="en-IN">Thank you for your time. Please contact the college at {safe_ph}. Goodbye.</Say>
 </Response>"""
 
+        if state.booking and _wants_to_cancel(parent_speech):
+            spoken = self._handle_cancellation(state)
+            return self._twiml(spoken, False)
+
+        if state.stage == STAGE_RESCHEDULE or (
+            state.booking and _wants_to_reschedule(parent_speech)
+        ):
+            spoken = self._handle_reschedule(state, parent_speech)
+            return self._twiml(spoken, False)
+
+        if state.stage == STAGE_MEETING:
+            spoken = self._handle_meeting_choice(state, parent_speech)
+            print(f"  [P] Parent : \"{parent_speech}\"")
+            print(f"  [CAL] Priya: \"{spoken[:90]}...\"")
+            return self._twiml(spoken, False)
+
         # Stage-aware closing detection
         if _parent_wants_to_end(parent_speech, state.stage):
             if state.turn_count >= 4:
@@ -489,7 +879,11 @@ class TwoWayAIVoiceService:
             speech_for_ai = parent_speech
 
         ai_text = self._ask_groq(state, speech_for_ai)
-        spoken, end_call = self._parse_reply(ai_text)
+        spoken, end_call, check_availability = self._parse_reply(ai_text)
+
+        if check_availability:
+            spoken = self._offer_available_slots(state, spoken)
+            end_call = False
 
         if end_call:
             state.ended = True

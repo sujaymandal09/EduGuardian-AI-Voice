@@ -155,7 +155,8 @@ def call_selective():
         risk_level=s.risk_level,
         details=s.details,
         recommended_action=s.recommended_action,
-        language="en"
+        language="en",
+        teacher_id=os.getenv("DEFAULT_TEACHER_ID", "default")
     ) for s in selected_students]
 
     voice   = get_voice_service()
