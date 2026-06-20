@@ -335,27 +335,47 @@ def _handle_parent_response_inner():
 # This makes the 2-3s gap invisible to the parent.
 
 _pending_responses: dict[str, str] = {}   # call_sid -> pre-computed TwiML
+_bridge_retry_count: dict[str, int] = {}  # call_sid -> retry attempts
 
 @app.route('/ai-response', methods=['POST'])
 def ai_response():
     """Second webhook: deliver the pre-computed Groq reply."""
-    call_sid = request.form.get('CallSid', '')
-    phone    = os.getenv('SCHOOL_PHONE', '033-4805-1910')
+    call_sid  = request.form.get('CallSid', '')
+    phone     = os.getenv('SCHOOL_PHONE', '033-4805-1910')
+    ngrok     = os.getenv('NGROK_URL', '')
 
     twiml = _pending_responses.pop(call_sid, None)
 
     if twiml:
         print(f"   [Bridge] Delivering cached reply for {call_sid}")
+        _bridge_retry_count.pop(call_sid, None)
         return twiml, 200, {'Content-Type': 'text/xml'}
 
-    # Groq wasn't ready yet — give it one more second then redirect back
-    # (rare: only if Groq took >2s)
-    ngrok = os.getenv('NGROK_URL', '')
-    print(f"   [Bridge] Reply not ready for {call_sid} — redirecting")
-    return f"""<?xml version="1.0" encoding="UTF-8"?>
+    # Groq not ready — track retries and cap at 3 (each retry = 0.5s = 1.5s max total wait)
+    retries = _bridge_retry_count.get(call_sid, 0) + 1
+    _bridge_retry_count[call_sid] = retries
+
+    if retries <= 3:
+        print(f"   [Bridge] Reply not ready for {call_sid} — retry {retries}/3")
+        return f"""<?xml version="1.0" encoding="UTF-8"?>
 <Response>
     <Pause length="1"/>
     <Redirect method="POST">{ngrok}/ai-response</Redirect>
+</Response>""", 200, {'Content-Type': 'text/xml'}
+
+    # 3 retries exceeded (~3s) — Groq is unusually slow
+    # Clean up and give a graceful fallback so call doesn't die silently
+    _pending_responses.pop(call_sid, None)
+    _bridge_retry_count.pop(call_sid, None)
+    print(f"   [Bridge] Timeout for {call_sid} after 3 retries — fallback")
+    return f"""<?xml version="1.0" encoding="UTF-8"?>
+<Response>
+    <Gather input="speech" language="en-IN"
+            action="{ngrok}/handle-parent-response"
+            method="POST" timeout="8" speechTimeout="auto" bargeIn="true">
+        <Say voice="Polly.Aditi" language="en-IN">I'm sorry, could you say that once more?</Say>
+    </Gather>
+    <Redirect method="POST">{ngrok}/handle-parent-response</Redirect>
 </Response>""", 200, {'Content-Type': 'text/xml'}
 
 

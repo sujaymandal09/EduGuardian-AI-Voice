@@ -214,7 +214,9 @@ YOUR PERSONALITY:
 STRICT CALL FLOW:
 1. Parent confirms identity → ONE sentence: acknowledge warmly + introduce yourself as Priya.
 2. Same reply: ask if it's a good time. Wait.
-   - YES → step 3  |  NO/busy → apologise, offer callback, goodbye [END_CALL]
+   - YES → step 3
+   - NO/busy AND asks to schedule: treat as YES — skip concern intro, go straight to scheduling [SCHEDULE_MEETING: soonest]
+   - NO/busy AND wants to end: apologise, offer callback number, goodbye [END_CALL]
 3. Introduce concern (1-2 sentences)
 4. Ask ONE open question, listen
 5. Continue based on what they said
@@ -230,9 +232,12 @@ EMOTIONAL INTELLIGENCE:
 - If parent shares something sad or difficult, acknowledge with empathy FIRST.
 - NEVER say "I'm glad" or "That's great" when parent said something difficult.
 
-WHEN PARENT SAYS "BUSY":
-- Treat as "I cannot do that time." Do NOT ask why.
-- Say one warm sentence then emit [SCHEDULE_MEETING: next_available].
+WHEN PARENT SAYS "BUSY" mid-call (after the concern has been introduced):
+- If they say busy BUT also ask to schedule/meet: ignore the busy, treat as agreement to meet.
+  Respond warmly and emit [SCHEDULE_MEETING: next_available].
+- If they say busy AND want to end (no mention of meeting): say one warm sentence + [END_CALL].
+- NEVER say the phone number and then continue talking about the concern.
+  Once you mention the phone number, the next tag must be [END_CALL].
 
 CLOSING:
 - NEVER use [END_CALL] on your own.
@@ -917,6 +922,26 @@ class TwoWayAIVoiceService:
         from services.schedule_manager import DAY_INDEX
         current_day = state.pending_slots[0]["day"].lower() if state.pending_slots else ""
 
+        # ── Repeat-request detector ───────────────────────────────
+        # Catches: 'tell me again', 'say again', 'repeat', 'what are the times', etc.
+        # Parent understood Priya but wants clarification — do NOT say 'I didn't catch that'.
+        # Just re-state the slots clearly and wait. This prevents the 4-turn repeat loop.
+        _REPEAT_SIGNALS = (
+            "tell me again", "say again", "repeat", "come again",
+            "what did you say", "what was that", "what are the", "what is the time",
+            "what time", "say it again", "speak again", "again please",
+            "could you repeat", "can you say", "can you tell",
+        )
+        # Only treat as repeat if there are no digits (digits = they're picking a time)
+        if (any(sig in speech_lower for sig in _REPEAT_SIGNALS)
+                and not any(c.isdigit() for c in speech_lower)
+                and not _match_slot_in_speech(parent_speech, state.pending_slots)):
+            times = ", ".join(_format_time_spoken(s["start_time"]) for s in state.pending_slots)
+            day   = state.pending_slots[0]["day"] if state.pending_slots else "that day"
+            return self._twiml(
+                f"Of course! On {day} we have slots at {times}. Which time suits you?",
+                False, state)
+
         # Today / tomorrow redirect
         for kw, pref in (("today", "today"), ("tomorrow", "tomorrow")):
             if (kw in speech_lower and f"not {kw}" not in speech_lower
@@ -945,7 +970,14 @@ class TwoWayAIVoiceService:
                 break
 
         if requested_day and requested_day == current_day and not _is_single_slot_confirm(parent_speech) and not _match_slot_in_speech(parent_speech, state.pending_slots):
-            times = ", ".join(_format_time_spoken(s["start_time"]) for s in state.pending_slots)
+            # Re-fetch ALL slots for this day fresh from DB — parent may be asking about
+            # a time of day (e.g. "afternoon") not currently in pending_slots
+            fresh_slots = _resolve_slots_for_day(requested_day)
+            if fresh_slots:
+                state.pending_slots = fresh_slots
+                times = ", ".join(_format_time_spoken(s["start_time"]) for s in fresh_slots)
+            else:
+                times = ", ".join(_format_time_spoken(s["start_time"]) for s in state.pending_slots)
             return self._twiml(f"For {requested_day.capitalize()} we have slots at {times}. Which time works best?",
                                False, state)
 
@@ -1050,7 +1082,8 @@ class TwoWayAIVoiceService:
                                    False, state)
             return self._twiml(f"I don't think we have a slot at that time. On {day} we have {times} — would either suit you?",
                                False, state)
-        return self._twiml(f"I didn't quite catch that. The available slots on {day} are {times}. Which one works best?",
+        # Parent said something unrecognised — just restate slots without implying we misheard them
+        return self._twiml(f"Just to confirm, on {day} we have slots at {times}. Which time works best for you?",
                            False, state)
 
     def make_call(self, payload: CallPayload) -> NotificationResult:
