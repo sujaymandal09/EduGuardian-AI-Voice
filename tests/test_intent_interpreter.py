@@ -81,12 +81,12 @@ class ContextualIntentTests(unittest.TestCase):
         ])
 
         identity_reply = service.generate_followup_twiml(payload.registration, "Yes.")
-        self.assertIn("Is now a good time", identity_reply)
+        self.assertIn("Do you have a few minutes", identity_reply)
         self.assertEqual(state.stage, STAGE_AVAILABILITY)
 
         availability_reply = service.generate_followup_twiml(payload.registration, "Oh, yes.")
         self.assertIn("Science performance has declined", availability_reply)
-        self.assertIn("noticed anything at home", availability_reply)
+        self.assertIn("affecting their studies", availability_reply)
         self.assertEqual(state.stage, STAGE_CONVERSATION)
         self.assertEqual(
             [message["role"] for message in state.messages],
@@ -140,8 +140,100 @@ class ContextualIntentTests(unittest.TestCase):
             payload.registration, "Yes, I am the parent."
         )
 
-        self.assertIn("Is now a good time", reply)
+        self.assertIn("Do you have a few minutes", reply)
         self.assertEqual(state.stage, STAGE_AVAILABILITY)
+
+    def test_opening_is_split_and_ends_with_identity_question(self):
+        payload = CallPayload(
+            to_number="+910000000000", registration="OPENING-1",
+            student_name="Saanvi Joshi", parent_name="Neha Joshi",
+            dimension="performance", risk_level="MEDIUM", details="Science grade is C.",
+        )
+        service = object.__new__(TwoWayAIVoiceService)
+        service._ngrok_url = "https://example.test"
+        service._phone = "12345"
+        service._school = "Test School"
+
+        opening = service._opening_twiml(payload)
+
+        self.assertIn("This is Priya calling from Test School", opening)
+        self.assertIn('<Pause length="1"/>', opening)
+        self.assertIn("Am I speaking with Neha Joshi?", opening)
+        self.assertNotIn("regarding your child", opening)
+
+    def test_each_dimension_uses_a_specific_open_question(self):
+        service = object.__new__(TwoWayAIVoiceService)
+        expected = {
+            "attendance": "affecting the attendance?",
+            "performance": "affecting their studies?",
+            "behavior": "things been at home recently?",
+        }
+        for dimension, ending in expected.items():
+            with self.subTest(dimension=dimension):
+                payload = CallPayload(
+                    to_number="+910000000000", registration=f"DIM-{dimension}",
+                    student_name="Saanvi", parent_name="Neha",
+                    dimension=dimension, risk_level="MEDIUM", details="A concern was recorded.",
+                )
+                state = ConversationState(payload, "Test School", "12345")
+                reply = service._begin_concern_discussion(state)
+                self.assertTrue(reply.endswith(ending))
+
+    def test_high_risk_concern_moves_to_verified_meeting_question(self):
+        payload = CallPayload(
+            to_number="+910000000000", registration="RISK-HIGH-CONVERSATION",
+            student_name="Aarav", parent_name="Mrs Sharma",
+            dimension="attendance", risk_level="HIGH", details="Attendance is critically low.",
+            teacher_id="teacher@example.com",
+        )
+        state = ConversationState(payload, "Test School", "12345")
+        state.stage = STAGE_CONVERSATION
+        service = object.__new__(TwoWayAIVoiceService)
+        service._calendar = self.calendar
+        service._phone = "12345"
+        service._ngrok_url = "https://example.test"
+        service._ai_ready = True
+        service._conversations = {payload.registration: state}
+        service._intent_interpreter = FakeInterpreter(TurnUnderstanding(
+            intent=ParentIntent.DISCUSS_CONCERN,
+            confidence=1.0,
+            assistant_reply="Thank you for explaining the situation.",
+        ))
+
+        reply = service.generate_followup_twiml(
+            payload.registration, "We have had a difficult week at home."
+        )
+
+        self.assertIn("earliest available meeting times?", reply)
+        self.assertTrue(state.awaiting_meeting_consent)
+        self.assertEqual(state.stage, STAGE_SOLUTION)
+
+    def test_low_risk_conversation_never_suggests_meeting(self):
+        payload = CallPayload(
+            to_number="+910000000000", registration="RISK-LOW-CONVERSATION",
+            student_name="Aarav", parent_name="Mrs Sharma",
+            dimension="behavior", risk_level="LOW", details="A minor concern was recorded.",
+        )
+        state = ConversationState(payload, "Test School", "12345")
+        state.stage = STAGE_CONVERSATION
+        service = object.__new__(TwoWayAIVoiceService)
+        service._calendar = self.calendar
+        service._phone = "12345"
+        service._ngrok_url = "https://example.test"
+        service._ai_ready = True
+        service._conversations = {payload.registration: state}
+        service._intent_interpreter = FakeInterpreter(TurnUnderstanding(
+            intent=ParentIntent.DISCUSS_CONCERN,
+            confidence=1.0,
+            assistant_reply="Would you like a meeting with the teacher?",
+        ))
+
+        reply = service.generate_followup_twiml(
+            payload.registration, "We will speak with him at home."
+        )
+
+        self.assertNotIn("meeting", reply.lower())
+        self.assertTrue(reply.split("</Say>", 1)[0].rstrip().endswith("?"))
 
     def test_dummy_call_moves_monday_booking_to_tuesday_without_duplicate(self):
         payload = CallPayload(

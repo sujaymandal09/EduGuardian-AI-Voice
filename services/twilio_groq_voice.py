@@ -413,7 +413,7 @@ RESOLUTION (HIGH risk):
 - A face-to-face meeting is essential. Propose it firmly but warmly.
 - Ask whether the parent would like you to check the teacher's calendar.
 - If they agree, let the application offer verified openings.
-- Do NOT accept monitoring alone as the outcome for a high-risk case.
+- Do NOT accept monitoring as the outcome for a high-risk case.
 """,
         "MEDIUM": f"""
 RESOLUTION (MEDIUM risk):
@@ -630,8 +630,8 @@ class ConversationState:
         self.awaiting_meeting_consent = False
         self.brief_mode = False
         self.last_agent_message = (
-            f"Am I speaking with {payload.parent_name}? This is Priya calling regarding "
-            f"your child {payload.student_name}."
+            f"Hello. This is Priya calling from {school}. "
+            f"Am I speaking with {payload.parent_name}?"
         )
         self.last_understanding: TurnUnderstanding | None = None
         self.system_prompt  = _build_counselor_prompt(
@@ -834,8 +834,8 @@ class TwoWayAIVoiceService:
             if state.stage == STAGE_INTRO:
                 state.stage = STAGE_AVAILABILITY
                 return (
-                    f"Thank you, {state.payload.parent_name}. Is now a good time to briefly "
-                    f"discuss {state.payload.student_name}'s progress?",
+                    f"Thank you, {state.payload.parent_name}. Do you have a few minutes "
+                    f"to discuss {state.payload.student_name}'s progress?",
                     False,
                 )
             if state.stage == STAGE_AVAILABILITY:
@@ -855,7 +855,11 @@ class TwoWayAIVoiceService:
             return (self._brief_call_response(state), False)
 
         if intent == ParentIntent.ASK_CURRENT_DATE:
-            return (f"Today is {self._calendar.now().strftime('%A, %B %d, %Y').replace(' 0', ' ')}.", False)
+            return (
+                f"Today is {self._calendar.now().strftime('%A, %B %d, %Y').replace(' 0', ' ')}. "
+                "Is there another date you'd like me to check?",
+                False,
+            )
 
         if state.brief_mode and intent == ParentIntent.DISCUSS_CONCERN:
             return (self._brief_followup_response(state), False)
@@ -948,7 +952,7 @@ class TwoWayAIVoiceService:
                 state.stage = STAGE_SOLUTION
                 return (
                     "Thank you for explaining. We'll monitor this closely and continue "
-                    "supporting your child. The school will follow up if the concern continues.",
+                    "supporting your child. Is there anything specific you'd like us to watch for?",
                     False,
                 )
             if state.booking:
@@ -1028,10 +1032,13 @@ class TwoWayAIVoiceService:
         if len(details) > 220:
             details = details[:217].rsplit(" ", 1)[0] + "..."
         state.stage = STAGE_CONVERSATION
-        return (
-            f"Thank you. I'm calling because {details} "
-            "Have you noticed anything at home that may be affecting this?"
-        )
+        dimension = state.payload.dimension.lower().replace("behaviour", "behavior")
+        question = {
+            "attendance": "Could you help me understand what may be affecting the attendance?",
+            "performance": "Have you noticed anything that may be affecting their studies?",
+            "behavior": "How have things been at home recently?",
+        }.get(dimension, "Could you share what you have noticed at home?")
+        return f"Thank you. I'm calling because {details} {question}"
 
     def _normalized_scheduling_request(
         self,
@@ -1081,16 +1088,32 @@ class TwoWayAIVoiceService:
         )
         if unsafe_calendar_claim:
             spoken = "I need to confirm that through the teacher's calendar first. What date or time would you prefer?"
-        if (
-            state.payload.risk_level.upper() == "MEDIUM"
+        risk = state.payload.risk_level.upper()
+        if risk == "HIGH" and understanding.intent == ParentIntent.DISCUSS_CONCERN:
+            if not _asks_for_meeting_consent(spoken):
+                spoken = spoken.rstrip(" .?") + (
+                    ". Because this is urgent, would you like me to check the teacher's "
+                    "earliest available meeting times?"
+                )
+            state.stage = STAGE_SOLUTION
+        elif (
+            risk == "MEDIUM"
             and not state.parent_requested_meeting
             and _explicitly_requests_meeting(spoken)
         ):
             spoken = (
                 "Thank you for explaining. We'll monitor this closely and continue "
-                "supporting your child. The school will follow up if the concern continues."
+                "supporting your child. Is there anything specific you'd like us to watch for at school?"
             )
             state.stage = STAGE_SOLUTION
+        elif risk == "LOW" and _explicitly_requests_meeting(spoken):
+            spoken = (
+                f"Thank you for explaining. We'll continue encouraging {state.payload.student_name} "
+                "and address this early. Is there anything else you'd like us to know?"
+            )
+            state.stage = STAGE_SOLUTION
+        if not spoken.rstrip().endswith("?"):
+            spoken = spoken.rstrip(" .") + ". Does that sound reasonable to you?"
         return self._tracked_twiml(state, spoken, False)
 
     # ── Parse control tag ─────────────────────────────────────────
@@ -1121,9 +1144,10 @@ class TwoWayAIVoiceService:
             )
         if risk == "MEDIUM":
             return (
-                f"{opening} We'll monitor this closely and follow up if it continues."
+                f"{opening} We'll monitor this closely and follow up if it continues. "
+                "Is there anything important you'd like us to know?"
             )
-        return f"{opening} I wanted to make you aware so we can address it early."
+        return f"{opening} I wanted to make you aware so we can address it early. Does that sound reasonable?"
 
     def _brief_followup_response(self, state: ConversationState) -> str:
         risk = state.payload.risk_level.upper()
@@ -1134,8 +1158,14 @@ class TwoWayAIVoiceService:
                 "check the teacher's earliest meeting times?"
             )
         if risk == "MEDIUM":
-            return "Thank you for explaining. We'll monitor this closely and contact you if it continues."
-        return "Thank you for explaining. We'll note this and continue supporting your child."
+            return (
+                "Thank you for explaining. We'll monitor this closely and contact you if it continues. "
+                "Is there anything specific you'd like us to watch for?"
+            )
+        return (
+            "Thank you for explaining. We'll note this and continue supporting your child. "
+            "Does that sound reasonable?"
+        )
 
     def _meeting_horizon_days(self, state: ConversationState) -> int | None:
         risk = state.payload.risk_level.upper()
@@ -1475,7 +1505,6 @@ class TwoWayAIVoiceService:
     # ── Opening TwiML ─────────────────────────────────────────────
     def _opening_twiml(self, payload: CallPayload) -> str:
         safe_parent  = html.escape(payload.parent_name)
-        safe_student = html.escape(payload.student_name)
         safe_school  = html.escape(self._school)
         safe_phone   = html.escape(self._phone)
         webhook      = f"{self._ngrok_url}/handle-parent-response"
@@ -1487,7 +1516,9 @@ class TwoWayAIVoiceService:
             method="POST"
             timeout="8"
             speechTimeout="auto">
-        <Say voice="Polly.Aditi" language="en-IN">Hello! Am I speaking with {safe_parent}? This is Priya calling from {safe_school}, regarding your child {safe_student}.</Say>
+        <Say voice="Polly.Aditi" language="en-IN">Hello. This is Priya calling from {safe_school}.</Say>
+        <Pause length="1"/>
+        <Say voice="Polly.Aditi" language="en-IN">Am I speaking with {safe_parent}?</Say>
     </Gather>
     <Say voice="Polly.Aditi" language="en-IN">I didn't hear a response. Please call us at {safe_phone}. Goodbye.</Say>
 </Response>"""
@@ -1541,7 +1572,10 @@ class TwoWayAIVoiceService:
 
         # Resolve deterministic calendar questions before any network AI call.
         if _asks_current_date(parent_speech):
-            spoken = f"Today is {self._calendar.now().strftime('%A, %B %d, %Y').replace(' 0', ' ')}."
+            spoken = (
+                f"Today is {self._calendar.now().strftime('%A, %B %d, %Y').replace(' 0', ' ')}. "
+                "Is there another date you'd like me to check?"
+            )
             return self._tracked_twiml(state, spoken, False)
 
         if state.booking and _wants_to_cancel(parent_speech):
