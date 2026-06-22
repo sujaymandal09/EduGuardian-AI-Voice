@@ -75,7 +75,7 @@
 
             <h3 style="margin-bottom: 15px;">Call Details:</h3>
             {% for call in results.details %}
-            <div class="call-item">
+            <div class="call-item"{% if call.get('sid') %} data-call-sid="{{ call.sid }}"{% endif %}>
                 <div class="icon">{{ '✅' if call.success else '❌' }}</div>
                 <div>
                     <div class="call-name">
@@ -85,14 +85,45 @@
                     <div class="call-detail">
                         Channel: {{ call.get('channel', 'voice') }} | SID: {{ call.get('sid', 'N/A') }}
                     </div>
+                    {% if call.get('sid') %}
+                    <div class="call-detail live-status">Call status: waiting for update</div>
+                    <div class="call-detail summary-status">Summary: pending</div>
+                    <a class="call-detail" href="{{ url_for('call_detail', call_sid=call.sid) }}">View transcript and summary</a>
+                    {% endif %}
                 </div>
             </div>
             {% endfor %}
 
             <div class="text-center">
+                <a href="/calls" class="btn" style="margin-right:10px;">View Call History</a>
                 <a href="/" class="btn">⬅ Back to Dashboard</a>
             </div>
         </div>
     </div>
+    <script>
+    const activeCalls = new Set();
+    document.querySelectorAll('[data-call-sid]').forEach((item) => activeCalls.add(item.dataset.callSid));
+
+    async function refreshCalls() {
+        for (const sid of Array.from(activeCalls)) {
+            const item = document.querySelector(`[data-call-sid="${CSS.escape(sid)}"]`);
+            if (!item) continue;
+            try {
+                const response = await fetch(`/api/calls/${encodeURIComponent(sid)}`, {cache: 'no-store'});
+                if (!response.ok) continue;
+                const call = await response.json();
+                item.querySelector('.live-status').textContent = `Call status: ${call.call_status || 'unknown'}`;
+                item.querySelector('.summary-status').textContent = `Summary: ${call.summary_status || 'pending'}`;
+                if (['completed', 'busy', 'failed', 'canceled', 'no-answer'].includes(call.call_status)) {
+                    if (!['pending', 'generating'].includes(call.summary_status)) activeCalls.delete(sid);
+                }
+            } catch (_) {
+                // A later poll can recover from a temporary network failure.
+            }
+        }
+        if (activeCalls.size) window.setTimeout(refreshCalls, 4000);
+    }
+    if (activeCalls.size) refreshCalls();
+    </script>
 </body>
 </html>

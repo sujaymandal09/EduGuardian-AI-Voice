@@ -5,12 +5,15 @@ import csv
 import logging
 import os
 import time
-from flask import Flask, render_template, request, redirect, url_for, flash
+from concurrent.futures import ThreadPoolExecutor
+from datetime import date, datetime
+from flask import Flask, render_template, request, redirect, url_for, flash, jsonify
 from dotenv import load_dotenv
 from core.models import StudentRecord, CallPayload
 from agents.attendance_agent import AttendanceAgent
 from agents.performance_agent import PerformanceAgent
 from agents.behavior_agent import BehaviorAgent
+from services.call_history import get_call_history_repository
 
 load_dotenv()
 
@@ -23,6 +26,7 @@ voice_service = None
 last_results = {}
 call_sid_map = {}       # maps Twilio CallSid to its voice conversation key
 silence_count = {}      # maps Twilio CallSid → number of consecutive no-speech events
+summary_executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="call-summary")
 
 os.makedirs('data', exist_ok=True)
 CSV_PATH = os.path.join('data', 'students.csv')
@@ -48,6 +52,16 @@ def get_voice_service():
             voice_service = TwoWayDemoService()
             print("🖥️  Demo Mode (no API keys)")
     return voice_service
+
+
+def _json_safe(value):
+    if isinstance(value, (datetime, date)):
+        return value.isoformat()
+    if isinstance(value, dict):
+        return {key: _json_safe(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_json_safe(item) for item in value]
+    return value
 
 
 def load_students():
@@ -196,6 +210,13 @@ def handle_parent_response():
         if count == 1:
             # First silence — one short clarification, then re-open Gather once more
             print(f"   [Silence #{count}] — asking once")
+            if hasattr(voice, 'record_system_turn'):
+                voice.record_system_turn(call_sid, "[No speech detected]")
+            if hasattr(voice, 'record_call_turn'):
+                voice.record_call_turn(
+                    call_sid, "agent",
+                    "I'm sorry, I couldn't catch that. Please go ahead whenever you're ready.",
+                )
             return f"""<?xml version="1.0" encoding="UTF-8"?>
 <Response>
     <Gather input="speech" language="en-IN"
@@ -211,6 +232,13 @@ def handle_parent_response():
         else:
             # Second (or more) silence — close gracefully, no more retries
             print(f"   [Silence #{count}] — closing gracefully")
+            if hasattr(voice, 'record_system_turn'):
+                voice.record_system_turn(call_sid, "[Call closed after repeated silence]")
+            if hasattr(voice, 'record_call_turn'):
+                voice.record_call_turn(
+                    call_sid, "agent",
+                    "I couldn't clearly hear the response, so I will conclude here for now.",
+                )
             silence_count.pop(call_sid, None)   # clean up
             return f"""<?xml version="1.0" encoding="UTF-8"?>
 <Response>
@@ -254,6 +282,67 @@ def handle_parent_response():
 <Response>
     <Say voice="Polly.Aditi" language="en-IN">Thank you. Please contact the college at {phone}. Goodbye.</Say>
 </Response>""", 200, {'Content-Type': 'text/xml'}
+
+
+@app.post('/twilio/call-status')
+def twilio_call_status():
+    """Persist Twilio lifecycle updates and queue one post-call summary."""
+    call_sid = request.form.get('CallSid', '').strip()
+    status = request.form.get('CallStatus', '').strip().lower()
+    duration_text = request.form.get('CallDuration', '').strip()
+    if not call_sid or not status:
+        return "", 400
+    try:
+        duration = int(duration_text) if duration_text else None
+    except ValueError:
+        duration = None
+    voice = get_voice_service()
+    try:
+        if hasattr(voice, 'update_call_status'):
+            voice.update_call_status(call_sid, status, duration)
+        if status == 'completed' and hasattr(voice, 'finalize_call_summary'):
+            summary_executor.submit(voice.finalize_call_summary, call_sid)
+    except Exception:
+        logger.exception("Could not process Twilio status for %s", call_sid)
+    return "", 204
+
+
+@app.get('/calls')
+def call_history():
+    repository = get_call_history_repository()
+    calls = repository.list_calls(limit=100) if repository.enabled else []
+    return render_template('call_history.html', calls=calls, history_enabled=repository.enabled)
+
+
+@app.get('/calls/<call_sid>')
+def call_detail(call_sid):
+    repository = get_call_history_repository()
+    call = repository.get_call(call_sid) if repository.enabled else None
+    if not call:
+        return "Call not found", 404
+    return render_template(
+        'call_detail.html', call=call, turns=repository.get_turns(call_sid)
+    )
+
+
+@app.get('/api/calls/<call_sid>')
+def call_detail_api(call_sid):
+    repository = get_call_history_repository()
+    call = repository.get_call(call_sid) if repository.enabled else None
+    if not call:
+        return jsonify({"error": "Call not found"}), 404
+    return jsonify(_json_safe(call))
+
+
+@app.post('/calls/<call_sid>/retry-summary')
+def retry_call_summary(call_sid):
+    repository = get_call_history_repository()
+    if not repository.enabled or not repository.get_call(call_sid):
+        return "Call not found", 404
+    voice = get_voice_service()
+    if hasattr(voice, 'finalize_call_summary'):
+        summary_executor.submit(voice.finalize_call_summary, call_sid)
+    return redirect(url_for('call_detail', call_sid=call_sid))
 
 
 @app.route('/upload', methods=['GET', 'POST'])

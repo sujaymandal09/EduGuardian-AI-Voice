@@ -4,6 +4,25 @@ EduGuardian calls parents about attendance, performance, and behavior concerns. 
 meeting flow checks a teacher's calendar, offers verified openings, and creates a
 booking only after the parent selects a time.
 
+## Amazon RDS call history
+
+Completed calls can persist their full speech transcript and a structured Groq
+summary in PostgreSQL. The meeting calendar remains the authority for booking
+details; summaries only describe the stored outcome.
+
+Install the dependencies, create an Amazon RDS PostgreSQL database, and apply
+`migrations/001_call_history.sql`. Then configure:
+
+```env
+CALL_HISTORY_ENABLED=true
+DATABASE_URL=postgresql+psycopg://username:password@rds-hostname:5432/eduguardian?sslmode=require
+```
+
+The application also creates missing tables on startup. Twilio call lifecycle
+events are sent to `/twilio/call-status`; ensure `NGROK_URL` or the deployed
+public URL is correct. After a call completes, view `/calls` for its status,
+calendar outcome, summary, and escaped chronological transcript.
+
 ## Calendar configuration
 
 The zero-setup default stores bookings in `data/teacher_calendar.json`:

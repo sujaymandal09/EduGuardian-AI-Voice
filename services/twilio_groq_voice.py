@@ -4,6 +4,7 @@ services/twilio_groq_voice.py
 2-Way AI Voice — Groq (llama-3.3-70b) + Twilio
 """
 import html
+import json
 import logging
 import os
 import re
@@ -16,6 +17,7 @@ except ImportError:  # Calendar and demo mode can run without the AI dependency.
     Groq = None
 from core.models import CallPayload, NotificationResult
 from services.calendar_service import CalendarService, CalendarSlot, create_calendar_service
+from services.call_history import get_call_history_repository
 from services.intent_interpreter import (
     ContextualIntentInterpreter,
     ParentIntent,
@@ -629,6 +631,7 @@ class ConversationState:
         self.parent_requested_meeting = False
         self.awaiting_meeting_consent = False
         self.brief_mode = False
+        self.call_sid: str | None = None
         self.last_agent_message = (
             f"Hello. This is Priya calling from {school}. "
             f"Am I speaking with {payload.parent_name}?"
@@ -679,6 +682,7 @@ class TwoWayAIVoiceService:
         self._phone        = os.getenv("SCHOOL_PHONE", "033-4805-1910")
         self._calendar     = calendar_service or create_calendar_service()
         self._intent_interpreter = intent_interpreter
+        self._call_history = get_call_history_repository()
 
         self._twilio_ready = all([self._twilio_sid, self._twilio_token, self._from_number])
         self._ai_ready     = bool(self._groq_key and Groq)
@@ -713,6 +717,7 @@ class TwoWayAIVoiceService:
     def _ask_groq(self, state: ConversationState, parent_speech: str) -> str:
         state.messages.append({"role": "user", "content": parent_speech})
         state.turn_count += 1
+        self._record_turn(state, "parent", parent_speech)
         state.advance_stage()
 
         try:
@@ -1063,11 +1068,103 @@ class TwoWayAIVoiceService:
         self, state: ConversationState, spoken: str, end_call: bool = False
     ) -> str:
         state.messages.append({"role": "assistant", "content": spoken})
+        self._record_turn(state, "agent", spoken)
         state.last_agent_message = spoken
         if state.payload.risk_level.upper() == "HIGH" and _asks_for_meeting_consent(spoken):
             state.awaiting_meeting_consent = True
         state.advance_stage()
         return self._twiml(spoken, end_call)
+
+    def _record_turn(
+        self, state: ConversationState, speaker: str, message: str,
+        *, intent: str | None = None,
+    ) -> None:
+        repository = getattr(self, "_call_history", None)
+        if not repository or not repository.enabled or not state.call_sid:
+            return
+        try:
+            repository.append_turn(
+                state.call_sid, speaker, message, intent=intent, stage=state.stage
+            )
+        except Exception:
+            logger.exception("Could not persist %s turn for %s", speaker, state.call_sid)
+
+    def record_system_turn(self, call_sid: str, message: str) -> None:
+        self.record_call_turn(call_sid, "system", message)
+
+    def record_call_turn(self, call_sid: str, speaker: str, message: str) -> None:
+        repository = getattr(self, "_call_history", None)
+        if repository and repository.enabled:
+            try:
+                repository.append_turn(call_sid, speaker, message)
+            except Exception:
+                logger.exception("Could not persist %s turn for %s", speaker, call_sid)
+
+    def update_call_status(
+        self, call_sid: str, status: str, duration: int | None = None
+    ) -> None:
+        repository = getattr(self, "_call_history", None)
+        if repository and repository.enabled:
+            repository.update_status(call_sid, status, duration)
+
+    def finalize_call_summary(self, call_sid: str) -> None:
+        repository = getattr(self, "_call_history", None)
+        if not repository or not repository.enabled or not repository.claim_summary(call_sid):
+            return
+        turns = repository.get_turns(call_sid)
+        if not any(turn.get("speaker") == "parent" for turn in turns):
+            repository.fail_summary(call_sid, "No parent speech was captured.")
+            return
+        call = repository.get_call(call_sid) or {}
+        transcript = [
+            {"speaker": turn["speaker"], "message": turn["message"]}
+            for turn in turns
+        ]
+        try:
+            if not self._ai_ready:
+                raise RuntimeError("Groq is not configured for summary generation.")
+            response = self._groq.chat.completions.create(
+                model=self.MODEL,
+                messages=[
+                    {
+                        "role": "system",
+                        "content": (
+                            "Summarize a school-parent call as one JSON object using only explicit "
+                            "facts. Never invent causes, diagnoses, promises, or meeting details. "
+                            "Required keys: brief_summary, parent_concerns, school_observations, "
+                            "agreed_actions, unresolved_questions, follow_up_required, parent_sentiment."
+                        ),
+                    },
+                    {
+                        "role": "user",
+                        "content": json.dumps({
+                            "metadata": {
+                                "student_name": call.get("student_name"),
+                                "dimension": call.get("dimension"),
+                                "risk_level": call.get("risk_level"),
+                            },
+                            "transcript": transcript,
+                        }, ensure_ascii=True),
+                    },
+                ],
+                response_format={"type": "json_object"},
+                temperature=0,
+                max_tokens=500,
+            )
+            summary = json.loads(response.choices[0].message.content)
+            for key in (
+                "parent_concerns", "school_observations", "agreed_actions",
+                "unresolved_questions",
+            ):
+                if not isinstance(summary.get(key), list):
+                    summary[key] = []
+            summary["brief_summary"] = str(summary.get("brief_summary", ""))[:2000]
+            summary["follow_up_required"] = bool(summary.get("follow_up_required", False))
+            summary["parent_sentiment"] = str(summary.get("parent_sentiment", "neutral"))[:40]
+            repository.save_summary(call_sid, summary)
+        except Exception as exc:
+            logger.exception("Summary generation failed for %s", call_sid)
+            repository.fail_summary(call_sid, str(exc))
 
     def _contextual_reply_twiml(
         self,
@@ -1351,6 +1448,9 @@ class TwoWayAIVoiceService:
             )
 
         state.booking = booking
+        repository = getattr(self, "_call_history", None)
+        if repository and repository.enabled and state.call_sid:
+            repository.update_meeting(state.call_sid, booking, "booked")
         state.offered_slots = []
         state.pending_action = None
         self._clear_pending_meeting_request(state)
@@ -1388,6 +1488,10 @@ class TwoWayAIVoiceService:
                 f"Please call the school at {self._phone} and we'll change it for you."
             )
 
+        repository = getattr(self, "_call_history", None)
+        if repository and repository.enabled and state.call_sid:
+            repository.update_meeting(state.call_sid, state.booking, "rescheduled")
+
         state.offered_slots = []
         state.pending_action = None
         self._clear_pending_meeting_request(state)
@@ -1404,6 +1508,9 @@ class TwoWayAIVoiceService:
                 f"Please call the school at {self._phone} for help."
             )
         state.booking = None
+        repository = getattr(self, "_call_history", None)
+        if repository and repository.enabled and state.call_sid:
+            repository.update_meeting(state.call_sid, None, "cancelled")
         state.offered_slots = []
         state.pending_action = None
         self._clear_pending_meeting_request(state)
@@ -1551,6 +1658,7 @@ class TwoWayAIVoiceService:
         # question that the parent has already answered.
         state.messages.append({"role": "user", "content": parent_speech})
         state.turn_count += 1
+        self._record_turn(state, "parent", parent_speech)
 
         if _declines_further_help(parent_speech):
             state.awaiting_meeting_consent = False
@@ -1720,13 +1828,28 @@ class TwoWayAIVoiceService:
 
         try:
             print(f"\n[CALL] Calling {payload.parent_name} ({payload.to_number})...")
-            call = self._client.calls.create(
+            call_options = dict(
                 to=payload.to_number,
                 from_=self._from_number,
-                twiml=twiml
+                twiml=twiml,
             )
+            if self._ngrok_url:
+                call_options.update(
+                    status_callback=f"{self._ngrok_url}/twilio/call-status",
+                    status_callback_event=["initiated", "ringing", "answered", "completed"],
+                    status_callback_method="POST",
+                )
+            call = self._client.calls.create(**call_options)
             # CallSid is unique even when the same student has overlapping calls.
+            state.call_sid = call.sid
             self._conversations[call.sid] = state
+            repository = getattr(self, "_call_history", None)
+            if repository and repository.enabled:
+                opening_message = (
+                    f"Hello. This is Priya calling from {self._school}. "
+                    f"Am I speaking with {payload.parent_name}?"
+                )
+                repository.create_call(call.sid, payload, opening_message)
             self.calls_made.append(payload)
             print(f"   [OK] SID: {call.sid}\n")
             return NotificationResult(
