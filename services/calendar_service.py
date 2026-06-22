@@ -42,6 +42,8 @@ class CalendarService(Protocol):
     meeting_start: time
     meeting_end: time
 
+    def now(self) -> datetime: ...
+
     def find_available_slots(
         self, teacher_id: str, *, start: datetime | None = None,
         days: int = 7, limit: int = 3
@@ -93,6 +95,9 @@ class LocalCalendarService:
             duration_minutes=int(os.getenv("MEETING_DURATION_MINUTES", "30")),
             working_days=_parse_working_days(os.getenv("MEETING_WORKING_DAYS", "mon,tue,wed,thu,fri")),
         )
+
+    def now(self) -> datetime:
+        return self._now_fn().astimezone(self.timezone)
 
     def find_available_slots(
         self, teacher_id: str, *, start: datetime | None = None,

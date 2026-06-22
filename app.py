@@ -2,7 +2,9 @@
 app.py - EduGuardian with Groq 2-Way AI Voice
 """
 import csv
+import logging
 import os
+import time
 from flask import Flask, render_template, request, redirect, url_for, flash
 from dotenv import load_dotenv
 from core.models import StudentRecord, CallPayload
@@ -12,12 +14,14 @@ from agents.behavior_agent import BehaviorAgent
 
 load_dotenv()
 
+logger = logging.getLogger(__name__)
+
 app = Flask(__name__)
 app.secret_key = os.getenv("SECRET_KEY", "attendance-guardian-secret")
 
 voice_service = None
 last_results = {}
-call_sid_map = {}       # maps Twilio CallSid → student registration
+call_sid_map = {}       # maps Twilio CallSid to its voice conversation key
 silence_count = {}      # maps Twilio CallSid → number of consecutive no-speech events
 
 os.makedirs('data', exist_ok=True)
@@ -165,9 +169,8 @@ def call_selective():
     # Store CallSid → registration so webhook finds the right conversation
     for detail in results.get("details", []):
         sid = detail.get("sid")
-        reg = detail.get("registration")
-        if sid and reg:
-            call_sid_map[sid] = reg
+        if sid:
+            call_sid_map[sid] = sid
 
     return render_template('call_status.html', results=results, dimension=dimension)
 
@@ -217,8 +220,13 @@ def handle_parent_response():
     # ── Speech received — reset silence counter ───────────────────
     silence_count.pop(call_sid, None)
 
-    # Find which student this call belongs to
-    registration = call_sid_map.get(call_sid)
+    # A live Groq call is stored under CallSid as soon as Twilio creates it.
+    # Use that key directly so a webhook does not wait for the batch route to finish.
+    registration = None
+    if call_sid and hasattr(voice, '_conversations') and call_sid in voice._conversations:
+        registration = call_sid
+    else:
+        registration = call_sid_map.get(call_sid)
     # Fallback: if only one call active, use that
     if not registration and hasattr(voice, '_conversations'):
         active = list(voice._conversations.keys())
@@ -227,8 +235,19 @@ def handle_parent_response():
 
     # Hand off to AI
     if registration and hasattr(voice, 'generate_followup_twiml'):
-        twiml = voice.generate_followup_twiml(registration, parent_speech)
-        return twiml, 200, {'Content-Type': 'text/xml'}
+        started = time.monotonic()
+        try:
+            twiml = voice.generate_followup_twiml(registration, parent_speech)
+            elapsed = time.monotonic() - started
+            if elapsed > 8:
+                logger.warning("Slow voice webhook for %s: %.2fs", call_sid, elapsed)
+            return twiml, 200, {'Content-Type': 'text/xml'}
+        except Exception:
+            logger.exception("Voice webhook failed for CallSid %s", call_sid)
+            return f"""<?xml version="1.0" encoding="UTF-8"?>
+<Response>
+    <Say voice="Polly.Aditi" language="en-IN">I'm sorry, I couldn't complete that request right now. Please contact the school at {phone}. Thank you.</Say>
+</Response>""", 200, {'Content-Type': 'text/xml'}
 
     # Hard fallback (no registration found)
     return f"""<?xml version="1.0" encoding="UTF-8"?>

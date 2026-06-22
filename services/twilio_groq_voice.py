@@ -16,6 +16,11 @@ except ImportError:  # Calendar and demo mode can run without the AI dependency.
     Groq = None
 from core.models import CallPayload, NotificationResult
 from services.calendar_service import CalendarService, CalendarSlot, create_calendar_service
+from services.intent_interpreter import (
+    ContextualIntentInterpreter,
+    ParentIntent,
+    TurnUnderstanding,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -120,6 +125,8 @@ def _wants_to_reschedule(speech: str) -> bool:
         return True
     if re.search(r"\b(?:instead|another\s+(?:time|slot|day)|different\s+(?:time|slot|day))\b", text):
         return True
+    if re.search(r"\bschedul\w*\b.*\bmeeting\b.*\b(?:to|for)\b", text):
+        return True
     return bool(re.search(
         r"\b(?:make|do)\s+(?:the\s+meeting\s+|it\s+|that\s+)?(?:for\s+|at\s+)?"
         r"(?:\d{1,2}(?::\d{2})?|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve)\b",
@@ -131,21 +138,123 @@ def _wants_to_cancel(speech: str) -> bool:
     text = speech.lower()
     return any(phrase in text for phrase in (
         "cancel the meeting", "cancel my meeting", "cancel our meeting",
+        "cancel it", "cancel that", "call it off", "call off the meeting",
         "delete the meeting", "remove the meeting", "can't attend the meeting",
-        "cannot attend the meeting",
+        "cannot attend the meeting", "don't need the meeting", "do not need the meeting",
     ))
+
+
+def _asks_current_date(speech: str) -> bool:
+    text = speech.lower()
+    return "date" in text and bool(re.search(
+        r"\b(?:today|today'?s|current|what\s+date|which\s+date|date\s+today)\b",
+        text,
+    ))
+
+
+def _asks_meeting_availability(speech: str) -> bool:
+    text = speech.lower()
+    return bool(
+        re.search(r"\b(?:meeting|meetings|slot|slots|appointment)\b", text)
+        and re.search(
+            r"\b(?:any|available|availability|free|possible|want|need|check|loaded|"
+            r"are\s+there|is\s+there|do\s+you\s+have|when\s+can)\b",
+            text,
+        )
+    )
+
+
+def _is_short_affirmative(speech: str) -> bool:
+    text = re.sub(r"[^a-z\s]", " ", speech.lower())
+    text = " ".join(text.split())
+    return text in {
+        "yes", "yes please", "sure", "okay", "ok", "that works",
+        "works for me", "sounds good", "please do", "go ahead", "do it",
+        "yes thank you", "sure thank you",
+    }
+
+
+def _expresses_time_limit(speech: str) -> bool:
+    text = speech.lower()
+    return bool(re.search(
+        r"\b(?:quick|quickly|brief|briefly|hurry|busy|little time|not much time|"
+        r"only (?:a |one |two |three )?(?:minute|minutes)|short on time)\b",
+        text,
+    ))
+
+
+def _explicitly_requests_meeting(speech: str) -> bool:
+    text = speech.lower()
+    return bool(
+        re.search(r"\b(?:meeting|meet|appointment|slot|slots)\b", text)
+        or re.search(r"\b(?:speak|talk|discussion)\b.*\bteacher\b", text)
+    )
+
+
+def _asks_for_meeting_consent(speech: str) -> bool:
+    text = speech.lower()
+    return "?" in speech and bool(
+        re.search(r"\b(?:meeting|meet)\b", text)
+        or re.search(r"\b(?:speak|talk)\b.*\bteacher\b", text)
+    )
+
+
+def _declines_further_help(speech: str) -> bool:
+    text = " ".join(re.sub(r"[^a-z\s']", " ", speech.lower()).split())
+    return bool(re.search(
+        r"\b(?:i )?(?:do not|don't) need (?:anything|anything else|a meeting)|"
+        r"\bnothing else\b|\bno(?:,)? thanks?\b|\bthat(?:'s| is) all\b",
+        text,
+    ))
+
+
+def _booking_change_from_temporal_reference(state, speech: str, timezone):
+    if not state.booking:
+        return None
+    parsed = _parse_meeting_request(speech, timezone)
+    if not parsed.date and not parsed.time and not parsed.range_start:
+        return None
+    changed_date = parsed.date and parsed.date != state.booking.start.date()
+    changed_time = parsed.time and parsed.time != state.booking.start.timetz().replace(tzinfo=None)
+    explicit_change = _wants_to_reschedule(speech) or "instead" in speech.lower()
+    short_reference = len(speech.split()) <= 10
+    changed_range = bool(parsed.range_start)
+    return parsed if (changed_date or changed_time or changed_range) and (explicit_change or short_reference) else None
 
 
 @dataclass(frozen=True)
 class ParsedMeetingRequest:
     date: calendar_date | None = None
     time: clock_time | None = None
+    range_start: calendar_date | None = None
+    range_end: calendar_date | None = None
 
 
 def _parse_meeting_request(speech: str, timezone, now: datetime | None = None) -> ParsedMeetingRequest:
     text = speech.lower().strip()
     today = (now or datetime.now(timezone)).astimezone(timezone).date()
     requested_date = None
+    range_start = None
+    range_end = None
+
+    next_monday = today + timedelta(days=((7 - today.weekday()) or 7))
+    if re.search(r"\b(?:next\s+to\s+next\s+week|week\s+after\s+next)\b", text):
+        range_start = next_monday + timedelta(days=7)
+        range_end = range_start + timedelta(days=6)
+    elif re.search(r"\bnext\s+week\b", text):
+        range_start = next_monday
+        range_end = range_start + timedelta(days=6)
+    elif re.search(r"\bnext\s+month\b", text):
+        if today.month == 12:
+            range_start = calendar_date(today.year + 1, 1, 1)
+        else:
+            range_start = calendar_date(today.year, today.month + 1, 1)
+        following_month = (
+            calendar_date(range_start.year + 1, 1, 1)
+            if range_start.month == 12
+            else calendar_date(range_start.year, range_start.month + 1, 1)
+        )
+        range_end = following_month - timedelta(days=1)
 
     iso = re.search(r"\b(20\d{2})-(\d{1,2})-(\d{1,2})\b", text)
     numeric_date = re.search(r"\b(\d{1,2})[/-](\d{1,2})[/-](20\d{2})\b", text)
@@ -161,6 +270,14 @@ def _parse_meeting_request(speech: str, timezone, now: datetime | None = None) -
     day_first = re.search(
         rf"\b(\d{{1,2}})(?:st|nd|rd|th)?\s+({month_names})(?:\s+(20\d{{2}}))?\b", text
     )
+    scheduling_context = bool(re.search(r"\b(?:meeting|meetings|slot|slots|appointment|date)\b", text))
+    day_only = None
+    if scheduling_context and not any((iso, numeric_date, month_first, day_first)):
+        day_only = (
+            re.search(r"\b(?:on|at|for)\s+(3[01]|[12]\d)(?:st|nd|rd|th)?\b", text)
+            or re.search(r"\b(?:on|for)\s+([1-9]|1[0-2])(?:st|nd|rd|th)\b", text)
+            or re.search(r"\bdate\s+(?:is\s+)?([1-9]|[12]\d|3[01])\b", text)
+        )
 
     try:
         if iso:
@@ -177,29 +294,45 @@ def _parse_meeting_request(speech: str, timezone, now: datetime | None = None) -
             requested_date = calendar_date(int(year or today.year), month, day)
             if not year and requested_date < today:
                 requested_date = requested_date.replace(year=today.year + 1)
+        elif day_only:
+            requested_date = calendar_date(today.year, today.month, int(day_only.group(1)))
+            if requested_date < today:
+                if today.month == 12:
+                    requested_date = calendar_date(today.year + 1, 1, int(day_only.group(1)))
+                else:
+                    requested_date = calendar_date(today.year, today.month + 1, int(day_only.group(1)))
         elif "day after tomorrow" in text:
             requested_date = today + timedelta(days=2)
         elif "tomorrow" in text:
             requested_date = today + timedelta(days=1)
         elif "today" in text:
             requested_date = today
-        else:
+        elif not range_start:
             weekdays = ["monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday"]
-            for weekday, name in enumerate(weekdays):
-                if re.search(rf"\b{name}\b", text):
-                    distance = (weekday - today.weekday()) % 7
-                    if "next " + name in text and distance == 0:
-                        distance = 7
-                    requested_date = today + timedelta(days=distance)
-                    break
+            matches = [
+                (match.start(), weekday, name)
+                for weekday, name in enumerate(weekdays)
+                for match in re.finditer(rf"\b{name}\b", text)
+            ]
+            if matches:
+                _, weekday, name = matches[-1] if len(matches) > 1 else matches[0]
+                distance = (weekday - today.weekday()) % 7
+                if "next " + name in text and distance == 0:
+                    distance = 7
+                requested_date = today + timedelta(days=distance)
     except ValueError:
         requested_date = None
 
+    time_text = text
+    if day_only:
+        time_text = text[:day_only.start()] + " " + text[day_only.end():]
     requested_time = None
     time_match = (
-        re.search(r"\b(?:at|around|from|by)\s+(\d{1,2})(?:[:.](\d{2}))?\s*(a\.?m\.?|p\.?m\.?)?\b", text)
-        or re.search(r"\b(\d{1,2})[:.](\d{2})\s*(a\.?m\.?|p\.?m\.?)?\b", text)
-        or re.search(r"\b(\d{1,2})\s*(a\.?m\.?|p\.?m\.?)\b", text)
+        re.search(r"\b(?:to|instead(?:\s+at)?|rather\s+at)\s+(\d{1,2})(?:[:.](\d{2}))?\s*(a\.?m\.?|p\.?m\.?)?\b", time_text)
+        or
+        re.search(r"\b(?:at|around|from|by)\s+(\d{1,2})(?:[:.](\d{2}))?\s*(a\.?m\.?|p\.?m\.?)?\b", time_text)
+        or re.search(r"\b(\d{1,2})[:.](\d{2})\s*(a\.?m\.?|p\.?m\.?)?\b", time_text)
+        or re.search(r"\b(\d{1,2})\s*(a\.?m\.?|p\.?m\.?)\b", time_text)
     )
     if time_match:
         groups = time_match.groups()
@@ -219,7 +352,7 @@ def _parse_meeting_request(speech: str, timezone, now: datetime | None = None) -
             "ten": 10, "eleven": 11,
         }
         word_match = re.search(
-            r"\b(?:at|around|from|by)\s+(" + "|".join(word_hours) + r")\b", text
+            r"\b(?:at|around|from|by)\s+(" + "|".join(word_hours) + r")\b", time_text
         )
         if word_match:
             hour = word_hours[word_match.group(1)]
@@ -227,7 +360,7 @@ def _parse_meeting_request(speech: str, timezone, now: datetime | None = None) -
                 hour += 12
             requested_time = clock_time(hour, 30 if "thirty" in text else 0)
 
-    return ParsedMeetingRequest(requested_date, requested_time)
+    return ParsedMeetingRequest(requested_date, requested_time, range_start, range_end)
 
 
 def _match_requested_slot(
@@ -407,6 +540,7 @@ STRICT CALL FLOW — FOLLOW THIS ORDER:
 1. Parent confirms who they are → acknowledge warmly (e.g. "I'm so glad I reached you.")
 2. Ask if it is a good time to talk → wait for answer
    - If YES / free → move to step 3
+   - If BUSY but asks you to be quick → give a brief concern summary; do not end the call
    - If NO / busy → apologise, offer to call back, say goodbye [END_CALL]
 3. Briefly introduce yourself and explain the concern — 1 to 2 sentences
 4. Ask ONE open question, listen genuinely
@@ -467,6 +601,9 @@ MEETING TOOL:
   can check the teacher's calendar and confirm a booking.
 - Never claim that a meeting was rescheduled or cancelled. The application must
   update the calendar event before that change can be confirmed.
+- For high-risk cases, automated slots are limited to the next two days.
+- For medium-risk cases, only check meeting slots when the parent asks, and limit
+  automated options to the next seven days.
 
 You are in a REAL phone call. React naturally. Be human. Speak English only.
 """.strip()
@@ -488,6 +625,15 @@ class ConversationState:
         self.booking = None
         self.pending_meeting_date: calendar_date | None = None
         self.pending_meeting_time: clock_time | None = None
+        self.pending_action: str | None = None
+        self.parent_requested_meeting = False
+        self.awaiting_meeting_consent = False
+        self.brief_mode = False
+        self.last_agent_message = (
+            f"Am I speaking with {payload.parent_name}? This is Priya calling regarding "
+            f"your child {payload.student_name}."
+        )
+        self.last_understanding: TurnUnderstanding | None = None
         self.system_prompt  = _build_counselor_prompt(
             school=school,
             phone=phone,
@@ -519,7 +665,11 @@ class TwoWayAIVoiceService:
     MODEL = "llama-3.1-8b-instant"
     MAX_HISTORY = 12
 
-    def __init__(self, calendar_service: CalendarService | None = None):
+    def __init__(
+        self,
+        calendar_service: CalendarService | None = None,
+        intent_interpreter: ContextualIntentInterpreter | None = None,
+    ):
         self._twilio_sid   = os.getenv("TWILIO_ACCOUNT_SID")
         self._twilio_token = os.getenv("TWILIO_AUTH_TOKEN")
         self._from_number  = os.getenv("TWILIO_FROM_NUMBER")
@@ -528,6 +678,7 @@ class TwoWayAIVoiceService:
         self._school       = os.getenv("SCHOOL_NAME", "Siliguri College")
         self._phone        = os.getenv("SCHOOL_PHONE", "033-4805-1910")
         self._calendar     = calendar_service or create_calendar_service()
+        self._intent_interpreter = intent_interpreter
 
         self._twilio_ready = all([self._twilio_sid, self._twilio_token, self._from_number])
         self._ai_ready     = bool(self._groq_key and Groq)
@@ -538,7 +689,9 @@ class TwoWayAIVoiceService:
             print("[OK] Twilio Connected")
 
         if self._ai_ready:
-            self._groq = Groq(api_key=self._groq_key)
+            self._groq = Groq(api_key=self._groq_key, timeout=6.0, max_retries=0)
+            if self._intent_interpreter is None:
+                self._intent_interpreter = ContextualIntentInterpreter(self._groq, self.MODEL)
             print(f"[OK] Groq Connected  [{self.MODEL}]")
             # Pre-warm the API to reduce cold-start latency on first call
             try:
@@ -565,13 +718,21 @@ class TwoWayAIVoiceService:
         try:
             # Cap message history to last 12 messages to limit input tokens
             recent = state.messages[-self.MAX_HISTORY:]
+            system_messages = [{"role": "system", "content": state.system_prompt}]
+            if state.brief_mode:
+                system_messages.append({
+                    "role": "system",
+                    "content": (
+                        "BRIEF MODE IS ACTIVE. The parent has very little time. Reply in one short "
+                        "sentence only. Do not ask another exploratory question. Acknowledge what "
+                        "they said and move directly to the appropriate next step or resolution."
+                    ),
+                })
             response = self._groq.chat.completions.create(
                 model=self.MODEL,
-                messages=[
-                    {"role": "system", "content": state.system_prompt}
-                ] + recent,
-                temperature=0.5,
-                max_tokens=80,
+                messages=system_messages + recent,
+                temperature=0.3 if state.brief_mode else 0.5,
+                max_tokens=45 if state.brief_mode else 80,
             )
             ai_text = response.choices[0].message.content.strip()
         except Exception as e:
@@ -584,6 +745,354 @@ class TwoWayAIVoiceService:
         state.messages.append({"role": "assistant", "content": ai_text})
         return ai_text
 
+    def _interpret_parent_turn(
+        self, state: ConversationState, parent_speech: str
+    ) -> TurnUnderstanding:
+        if getattr(self, "_intent_interpreter", None) is None:
+            return TurnUnderstanding.unclear("No contextual interpreter is configured.")
+        booking = None
+        if state.booking:
+            booking = {
+                "event_id": state.booking.event_id,
+                "date": state.booking.start.date().isoformat(),
+                "start_time": state.booking.start.strftime("%H:%M"),
+                "end_time": state.booking.end.strftime("%H:%M"),
+            }
+        context = {
+            "stage": state.stage,
+            "last_agent_message": state.last_agent_message,
+            "active_booking": booking,
+            "offered_slots": [
+                {
+                    "option": index,
+                    "date": slot.start.date().isoformat(),
+                    "time": slot.start.strftime("%H:%M"),
+                }
+                for index, slot in enumerate(state.offered_slots, 1)
+            ],
+            "pending_action": state.pending_action,
+            "risk_level": state.payload.risk_level.upper(),
+            "concern_dimension": state.payload.dimension,
+            "student_name": state.payload.student_name,
+            "parent_name": state.payload.parent_name,
+            "concern_details": state.payload.details,
+            "recommended_action": getattr(state.payload, "recommended_action", ""),
+            "school_phone": self._phone,
+            "parent_requested_meeting": state.parent_requested_meeting,
+            "brief_mode": state.brief_mode,
+            "pending_date": (
+                state.pending_meeting_date.isoformat() if state.pending_meeting_date else None
+            ),
+            "pending_time": (
+                state.pending_meeting_time.strftime("%H:%M") if state.pending_meeting_time else None
+            ),
+            "current_datetime": self._calendar.now().isoformat(),
+            "timezone": str(self._calendar.timezone),
+            "working_days": sorted(self._calendar.working_days),
+            "recent_turns": state.messages[-6:],
+        }
+        understanding = self._intent_interpreter.interpret(parent_speech, context)
+        state.last_understanding = understanding
+        print(
+            f"  [NLU] Intent: {understanding.intent.value} | "
+            f"Confidence: {understanding.confidence:.2f} | "
+            f"Target: {understanding.target_date or '-'} {understanding.target_time or '-'}"
+        )
+        return understanding
+
+    def _route_contextual_action(
+        self,
+        state: ConversationState,
+        parent_speech: str,
+        understanding: TurnUnderstanding,
+    ) -> tuple[str, bool] | None:
+        action_intents = {
+            ParentIntent.SCHEDULE_MEETING,
+            ParentIntent.SELECT_SLOT,
+            ParentIntent.CHECK_AVAILABILITY,
+            ParentIntent.RESCHEDULE_MEETING,
+            ParentIntent.CANCEL_MEETING,
+            ParentIntent.CONFIRM_ACTION,
+            ParentIntent.DECLINE_ACTION,
+            ParentIntent.END_CALL,
+        }
+        if not understanding.interpreted:
+            return None
+        if understanding.intent in action_intents and (
+            understanding.confidence < ContextualIntentInterpreter.MIN_ACTION_CONFIDENCE
+        ):
+            return (
+                "I want to make sure I understood correctly. Are you asking to schedule, "
+                "move, or cancel a meeting?",
+                False,
+            )
+
+        intent = understanding.intent
+        normalized = self._normalized_scheduling_request(state, parent_speech, understanding)
+
+        if intent == ParentIntent.CONFIRM_IDENTITY:
+            if state.stage == STAGE_INTRO:
+                state.stage = STAGE_AVAILABILITY
+                return (
+                    f"Thank you, {state.payload.parent_name}. Is now a good time to briefly "
+                    f"discuss {state.payload.student_name}'s progress?",
+                    False,
+                )
+            if state.stage == STAGE_AVAILABILITY:
+                return (self._begin_concern_discussion(state), False)
+
+        if intent == ParentIntent.AVAILABLE_TO_TALK:
+            return (self._begin_concern_discussion(state), False)
+
+        if intent == ParentIntent.CONFIRM_ACTION and state.stage == STAGE_AVAILABILITY:
+            return (self._begin_concern_discussion(state), False)
+
+        if intent == ParentIntent.AVAILABLE_BRIEFLY:
+            if not _expresses_time_limit(parent_speech):
+                if state.stage in {STAGE_INTRO, STAGE_AVAILABILITY}:
+                    return (self._begin_concern_discussion(state), False)
+                return None
+            return (self._brief_call_response(state), False)
+
+        if intent == ParentIntent.ASK_CURRENT_DATE:
+            return (f"Today is {self._calendar.now().strftime('%A, %B %d, %Y').replace(' 0', ' ')}.", False)
+
+        if state.brief_mode and intent == ParentIntent.DISCUSS_CONCERN:
+            return (self._brief_followup_response(state), False)
+
+        scheduling_intents = {
+            ParentIntent.SCHEDULE_MEETING,
+            ParentIntent.CHECK_AVAILABILITY,
+            ParentIntent.SELECT_SLOT,
+            ParentIntent.CONFIRM_ACTION,
+        }
+        if state.stage == STAGE_MEETING and intent in scheduling_intents:
+            if understanding.range_start and understanding.range_end:
+                return (
+                    self._offer_slots_for_range(
+                        state,
+                        calendar_date.fromisoformat(understanding.range_start),
+                        calendar_date.fromisoformat(understanding.range_end),
+                    ),
+                    False,
+                )
+            if understanding.target_date and not understanding.target_time:
+                return (
+                    self._offer_slots_for_date(
+                        state, calendar_date.fromisoformat(understanding.target_date)
+                    ),
+                    False,
+                )
+            return (self._handle_meeting_choice(state, normalized), False)
+
+        if state.stage == STAGE_RESCHEDULE and state.booking and intent in scheduling_intents:
+            if understanding.range_start and understanding.range_end:
+                return (
+                    self._offer_slots_for_range(
+                        state,
+                        calendar_date.fromisoformat(understanding.range_start),
+                        calendar_date.fromisoformat(understanding.range_end),
+                        for_reschedule=True,
+                    ),
+                    False,
+                )
+            if understanding.target_date and not understanding.target_time:
+                return (
+                    self._offer_slots_for_date(
+                        state, calendar_date.fromisoformat(understanding.target_date),
+                        for_reschedule=True,
+                    ),
+                    False,
+                )
+            return (self._handle_reschedule(state, normalized), False)
+
+        if intent == ParentIntent.CANCEL_MEETING:
+            if not state.booking:
+                return ("There isn't an active meeting to cancel during this call.", False)
+            return (self._handle_cancellation(state), False)
+
+        if intent == ParentIntent.RESCHEDULE_MEETING:
+            if not state.booking:
+                return (
+                    "There isn't an active meeting to move yet. Would you like me to check available times?",
+                    False,
+                )
+            state.pending_action = "reschedule_meeting"
+            state.parent_requested_meeting = True
+            if understanding.range_start and understanding.range_end:
+                return (
+                    self._offer_slots_for_range(
+                        state,
+                        calendar_date.fromisoformat(understanding.range_start),
+                        calendar_date.fromisoformat(understanding.range_end),
+                        for_reschedule=True,
+                    ),
+                    False,
+                )
+            if understanding.target_date and not understanding.target_time:
+                return (
+                    self._offer_slots_for_date(
+                        state, calendar_date.fromisoformat(understanding.target_date),
+                        for_reschedule=True,
+                    ),
+                    False,
+                )
+            return (self._handle_reschedule(state, normalized), False)
+
+        if intent in {ParentIntent.SCHEDULE_MEETING, ParentIntent.CHECK_AVAILABILITY}:
+            if (
+                state.payload.risk_level.upper() == "MEDIUM"
+                and not state.awaiting_meeting_consent
+                and not _explicitly_requests_meeting(parent_speech)
+            ):
+                state.stage = STAGE_SOLUTION
+                return (
+                    "Thank you for explaining. We'll monitor this closely and continue "
+                    "supporting your child. The school will follow up if the concern continues.",
+                    False,
+                )
+            if state.booking:
+                return (
+                    f"You already have a meeting booked for {CalendarSlot(state.booking.start, state.booking.end).spoken()}. "
+                    "Would you like to move that meeting?",
+                    False,
+                )
+            state.pending_action = "schedule_meeting"
+            state.parent_requested_meeting = True
+            state.awaiting_meeting_consent = False
+            if understanding.range_start and understanding.range_end:
+                return (
+                    self._offer_slots_for_range(
+                        state,
+                        calendar_date.fromisoformat(understanding.range_start),
+                        calendar_date.fromisoformat(understanding.range_end),
+                    ),
+                    False,
+                )
+            if understanding.target_date and not understanding.target_time:
+                return (
+                    self._offer_slots_for_date(
+                        state, calendar_date.fromisoformat(understanding.target_date)
+                    ),
+                    False,
+                )
+            return (self._offer_available_slots(state), False)
+
+        if intent == ParentIntent.SELECT_SLOT:
+            if state.stage == STAGE_RESCHEDULE and state.booking:
+                return (self._handle_reschedule(state, normalized), False)
+            if state.stage == STAGE_MEETING:
+                return (self._handle_meeting_choice(state, normalized), False)
+            return None
+
+        if intent == ParentIntent.CONFIRM_ACTION:
+            if state.stage == STAGE_RESCHEDULE and state.booking:
+                return (self._handle_reschedule(state, normalized), False)
+            if state.stage == STAGE_MEETING:
+                return (self._handle_meeting_choice(state, normalized), False)
+            meeting_context = "meeting" in parent_speech.lower() or (
+                "meeting" in state.last_agent_message.lower()
+                and re.search(r"\b(?:yes|sure|okay|ok|please do|go ahead)\b", parent_speech.lower())
+            )
+            if meeting_context and not state.booking:
+                state.parent_requested_meeting = True
+                state.awaiting_meeting_consent = False
+                state.pending_action = "schedule_meeting"
+                return (self._offer_available_slots(state), False)
+            return None
+
+        if intent == ParentIntent.DECLINE_ACTION and state.stage in {
+            STAGE_MEETING, STAGE_RESCHEDULE
+        }:
+            state.offered_slots = []
+            state.pending_action = None
+            self._clear_pending_meeting_request(state)
+            state.stage = STAGE_FAREWELL
+            return ("Of course, I understand. Is there anything else you'd like to discuss?", False)
+
+        if intent == ParentIntent.END_CALL:
+            if state.stage == STAGE_FAREWELL:
+                state.ended = True
+                return (
+                    f"Thank you for your time. The school is available Monday to Friday, "
+                    f"9 AM to 4 PM, at {self._phone}. Goodbye.",
+                    True,
+                )
+            state.stage = STAGE_FAREWELL
+            return ("Before we finish, is there anything else you'd like to discuss?", False)
+
+        return None
+
+    def _begin_concern_discussion(self, state: ConversationState) -> str:
+        details = " ".join(state.payload.details.split()).strip()
+        if len(details) > 220:
+            details = details[:217].rsplit(" ", 1)[0] + "..."
+        state.stage = STAGE_CONVERSATION
+        return (
+            f"Thank you. I'm calling because {details} "
+            "Have you noticed anything at home that may be affecting this?"
+        )
+
+    def _normalized_scheduling_request(
+        self,
+        state: ConversationState,
+        original_speech: str,
+        understanding: TurnUnderstanding,
+    ) -> str:
+        if understanding.selected_option:
+            return f"option {understanding.selected_option}"
+        target_date = understanding.target_date
+        if not target_date and understanding.target_time and state.booking:
+            target_date = state.booking.start.date().isoformat()
+        if target_date and understanding.target_time:
+            return f"{target_date} at {understanding.target_time}"
+        if target_date:
+            return target_date
+        if understanding.target_time:
+            return f"at {understanding.target_time}"
+        return original_speech
+
+    def _tracked_twiml(
+        self, state: ConversationState, spoken: str, end_call: bool = False
+    ) -> str:
+        state.messages.append({"role": "assistant", "content": spoken})
+        state.last_agent_message = spoken
+        if state.payload.risk_level.upper() == "HIGH" and _asks_for_meeting_consent(spoken):
+            state.awaiting_meeting_consent = True
+        state.advance_stage()
+        return self._twiml(spoken, end_call)
+
+    def _contextual_reply_twiml(
+        self,
+        state: ConversationState,
+        parent_speech: str,
+        understanding: TurnUnderstanding,
+    ) -> str:
+        if not understanding.interpreted:
+            spoken = "I'm sorry, I didn't catch that clearly. Could you please say it once more?"
+        else:
+            spoken = understanding.assistant_reply or (
+                "I want to make sure I understood you correctly. Could you please clarify?"
+            )
+        unsafe_calendar_claim = re.search(
+            r"\b(?:booked|scheduled|rescheduled|cancelled|canceled)\b.*\bmeeting\b|"
+            r"\bmeeting\b.*\b(?:booked|scheduled|rescheduled|cancelled|canceled)\b",
+            spoken.lower(),
+        )
+        if unsafe_calendar_claim:
+            spoken = "I need to confirm that through the teacher's calendar first. What date or time would you prefer?"
+        if (
+            state.payload.risk_level.upper() == "MEDIUM"
+            and not state.parent_requested_meeting
+            and _explicitly_requests_meeting(spoken)
+        ):
+            spoken = (
+                "Thank you for explaining. We'll monitor this closely and continue "
+                "supporting your child. The school will follow up if the concern continues."
+            )
+            state.stage = STAGE_SOLUTION
+        return self._tracked_twiml(state, spoken, False)
+
     # ── Parse control tag ─────────────────────────────────────────
     def _parse_reply(self, ai_text: str) -> tuple[str, bool, bool]:
         end_call = "[END_CALL]" in ai_text
@@ -595,11 +1104,160 @@ class TwoWayAIVoiceService:
                   .strip())
         return spoken, end_call, check_availability
 
+    def _brief_call_response(self, state: ConversationState) -> str:
+        if state.brief_mode:
+            return self._brief_followup_response(state)
+        state.brief_mode = True
+        state.stage = STAGE_SOLUTION
+        details = " ".join(state.payload.details.split())
+        if len(details) > 220:
+            details = details[:217].rsplit(" ", 1)[0] + "..."
+        opening = f"I'll keep this brief. The reason for my call is that {details}"
+        risk = state.payload.risk_level.upper()
+        if risk == "HIGH":
+            return (
+                f"{opening} Because this is urgent, would you like me to check the "
+                "teacher's earliest meeting times?"
+            )
+        if risk == "MEDIUM":
+            return (
+                f"{opening} We'll monitor this closely and follow up if it continues."
+            )
+        return f"{opening} I wanted to make you aware so we can address it early."
+
+    def _brief_followup_response(self, state: ConversationState) -> str:
+        risk = state.payload.risk_level.upper()
+        state.stage = STAGE_SOLUTION
+        if risk == "HIGH":
+            return (
+                "Thank you for explaining. Because this is urgent, would you like me to "
+                "check the teacher's earliest meeting times?"
+            )
+        if risk == "MEDIUM":
+            return "Thank you for explaining. We'll monitor this closely and contact you if it continues."
+        return "Thank you for explaining. We'll note this and continue supporting your child."
+
+    def _meeting_horizon_days(self, state: ConversationState) -> int | None:
+        risk = state.payload.risk_level.upper()
+        if risk == "HIGH":
+            return 2
+        if risk == "MEDIUM" and state.parent_requested_meeting:
+            return 7
+        return None
+
+    def _meeting_policy_message(self, state: ConversationState) -> str | None:
+        risk = state.payload.risk_level.upper()
+        if risk == "MEDIUM" and not state.parent_requested_meeting:
+            return "We'll monitor this closely. If you would like a meeting, please ask and I can check the teacher's schedule."
+        if risk == "LOW":
+            return f"A meeting isn't normally needed for this concern. Please contact the school at {self._phone} if you'd still like to arrange one."
+        return None
+
+    def _horizon_error_for_date(
+        self, state: ConversationState, requested_date: calendar_date
+    ) -> str | None:
+        horizon = self._meeting_horizon_days(state)
+        if horizon is None:
+            return self._meeting_policy_message(state)
+        last_date = self._calendar.now().date() + timedelta(days=horizon)
+        if requested_date > last_date:
+            label = "two days" if horizon == 2 else "one week"
+            return (
+                f"Automated meeting options for this {state.payload.risk_level.lower()}-risk case "
+                f"are limited to the next {label}. For a later date, please contact the "
+                f"school at {self._phone}."
+            )
+        return None
+
+    def _offer_slots_for_date(
+        self,
+        state: ConversationState,
+        requested_date: calendar_date,
+        *,
+        for_reschedule: bool = False,
+    ) -> str:
+        if requested_date.weekday() not in self._calendar.working_days:
+            return (
+                f"{requested_date.strftime('%A')} is outside the teacher's working days. "
+                f"Meetings are available {_working_days_label(self._calendar.working_days)}."
+            )
+        policy_message = self._horizon_error_for_date(state, requested_date)
+        if policy_message:
+            return policy_message
+        day_start = datetime.combine(requested_date, clock_time.min, self._calendar.timezone)
+        cursor = max(day_start, self._calendar.now())
+        try:
+            slots = self._calendar.find_available_slots(
+                state.payload.teacher_id, start=cursor, days=0, limit=3
+            )
+        except Exception as exc:
+            logger.error("Calendar date availability error: %s", exc)
+            return f"I can't access the teacher's calendar right now. Please contact the school at {self._phone}."
+        if not slots:
+            return (
+                f"There are no available meeting times on {requested_date.strftime('%A, %B %d')}. "
+                f"Please contact the school at {self._phone} for another arrangement."
+            )
+        state.offered_slots = slots
+        state.pending_meeting_date = requested_date
+        state.pending_action = "reschedule_meeting" if for_reschedule else "schedule_meeting"
+        state.stage = STAGE_RESCHEDULE if for_reschedule else STAGE_MEETING
+        return (
+            f"The available times on {requested_date.strftime('%A, %B %d')} are "
+            f"{_join_spoken_slots(slots)}. Which works best for you?"
+        )
+
+    def _offer_slots_for_range(
+        self,
+        state: ConversationState,
+        range_start: calendar_date,
+        range_end: calendar_date,
+        *,
+        for_reschedule: bool = False,
+    ) -> str:
+        policy_message = self._meeting_policy_message(state)
+        if policy_message:
+            return policy_message
+        horizon = self._meeting_horizon_days(state)
+        last_allowed = self._calendar.now().date() + timedelta(days=horizon or 0)
+        if range_start > last_allowed:
+            return self._horizon_error_for_date(state, range_start) or (
+                f"Please contact the school at {self._phone} for that date range."
+            )
+        effective_end = min(range_end, last_allowed)
+        cursor = max(
+            self._calendar.now(),
+            datetime.combine(range_start, clock_time.min, self._calendar.timezone),
+        )
+        days = max(0, (effective_end - cursor.date()).days)
+        try:
+            slots = self._calendar.find_available_slots(
+                state.payload.teacher_id, start=cursor, days=days, limit=3
+            )
+        except Exception as exc:
+            logger.error("Calendar range availability error: %s", exc)
+            return f"I can't access the teacher's calendar right now. Please contact the school at {self._phone}."
+        if not slots:
+            return (
+                "There are no available meeting times in that period. "
+                f"Please contact the school at {self._phone} for another arrangement."
+            )
+        state.offered_slots = slots
+        state.pending_action = "reschedule_meeting" if for_reschedule else "schedule_meeting"
+        state.stage = STAGE_RESCHEDULE if for_reschedule else STAGE_MEETING
+        return f"The available times in that period are {_join_spoken_slots(slots)}. Which works best for you?"
+
     def _offer_available_slots(
         self, state: ConversationState, prefix: str = "", *, for_reschedule: bool = False
     ) -> str:
+        policy_message = self._meeting_policy_message(state)
+        if policy_message:
+            return policy_message
+        horizon = self._meeting_horizon_days(state)
         try:
-            slots = self._calendar.find_available_slots(state.payload.teacher_id, limit=3)
+            slots = self._calendar.find_available_slots(
+                state.payload.teacher_id, days=horizon or 0, limit=3
+            )
         except Exception as exc:
             logger.error("Calendar availability error: %s", exc)
             state.stage = STAGE_FAREWELL
@@ -610,12 +1268,14 @@ class TwoWayAIVoiceService:
         state.offered_slots = slots
         if not slots:
             state.stage = STAGE_FAREWELL
+            window = "two days" if horizon == 2 else "one week"
             return (
-                "I checked the teacher's calendar, but there aren't any openings in the next week. "
+                f"I checked the teacher's calendar, but there aren't any openings in the next {window}. "
                 f"Please call the school at {self._phone} and we'll help arrange another time."
             )
 
         state.stage = STAGE_RESCHEDULE if for_reschedule else STAGE_MEETING
+        state.pending_action = "reschedule_meeting" if for_reschedule else "schedule_meeting"
         choices = _join_spoken_slots(slots)
         lead = f"{prefix.strip()} " if prefix.strip() else ""
         return f"{lead}I checked the teacher's calendar. The available times are {choices}. Which works best for you?"
@@ -624,6 +1284,7 @@ class TwoWayAIVoiceService:
         if _declines_meeting(parent_speech):
             state.stage = STAGE_FAREWELL
             state.offered_slots = []
+            state.pending_action = None
             self._clear_pending_meeting_request(state)
             return "Of course, I understand. Is there anything else you'd like to discuss?"
 
@@ -635,6 +1296,9 @@ class TwoWayAIVoiceService:
         if policy_error:
             choices = _join_spoken_slots(state.offered_slots[:2])
             return f"{policy_error} The next available options are {choices}. Which would you prefer?"
+        horizon_error = self._horizon_error_for_date(state, slot.start.date())
+        if horizon_error:
+            return horizon_error
 
         try:
             booking = self._calendar.book_meeting(
@@ -658,11 +1322,14 @@ class TwoWayAIVoiceService:
 
         state.booking = booking
         state.offered_slots = []
+        state.pending_action = None
         self._clear_pending_meeting_request(state)
         state.stage = STAGE_FAREWELL
         return f"Your meeting is booked for {slot.spoken()}. Is there anything else I can help with?"
 
     def _handle_reschedule(self, state: ConversationState, parent_speech: str) -> str:
+        state.pending_action = "reschedule_meeting"
+        state.parent_requested_meeting = True
         slot = self._requested_slot_with_context(state, parent_speech)
         if not slot:
             state.stage = STAGE_RESCHEDULE
@@ -673,6 +1340,9 @@ class TwoWayAIVoiceService:
             return self._offer_available_slots(
                 state, policy_error, for_reschedule=True
             )
+        horizon_error = self._horizon_error_for_date(state, slot.start.date())
+        if horizon_error:
+            return horizon_error
 
         try:
             state.booking = self._calendar.reschedule_meeting(state.booking, slot)
@@ -689,6 +1359,7 @@ class TwoWayAIVoiceService:
             )
 
         state.offered_slots = []
+        state.pending_action = None
         self._clear_pending_meeting_request(state)
         state.stage = STAGE_FAREWELL
         return f"Your meeting has been moved to {slot.spoken()}. Is there anything else I can help with?"
@@ -704,6 +1375,7 @@ class TwoWayAIVoiceService:
             )
         state.booking = None
         state.offered_slots = []
+        state.pending_action = None
         self._clear_pending_meeting_request(state)
         state.stage = STAGE_FAREWELL
         return "The meeting has been cancelled in the teacher's calendar. Is there anything else I can help with?"
@@ -724,6 +1396,8 @@ class TwoWayAIVoiceService:
         if parsed.time and not parsed.date:
             clock = parsed.time.strftime("%I:%M %p").lstrip("0")
             return f"Which working day would you prefer for {clock}?"
+        if state.offered_slots:
+            return f"Please choose one of these times: {_join_spoken_slots(state.offered_slots)}."
         return f"What day and time would you like to {action}?"
 
     def _requested_slot_with_context(
@@ -740,6 +1414,12 @@ class TwoWayAIVoiceService:
             state.pending_meeting_date = parsed.date
         if parsed.time:
             state.pending_meeting_time = parsed.time
+            if (
+                not parsed.date
+                and state.pending_action == "reschedule_meeting"
+                and state.booking
+            ):
+                state.pending_meeting_date = state.booking.start.date()
         if state.pending_meeting_date and state.pending_meeting_time:
             start = datetime.combine(
                 state.pending_meeting_date, state.pending_meeting_time,
@@ -754,10 +1434,10 @@ class TwoWayAIVoiceService:
         state.pending_meeting_time = None
 
     def _slot_policy_error(self, slot: CalendarSlot) -> str | None:
-        if slot.start <= datetime.now(self._calendar.timezone):
-            return "That requested time has already passed."
         if slot.start.weekday() not in self._calendar.working_days:
             return f"Meetings are only available {_working_days_label(self._calendar.working_days)}."
+        if slot.start <= self._calendar.now():
+            return "That requested time has already passed."
         if (
             slot.start.timetz().replace(tzinfo=None) < self._calendar.meeting_start
             or slot.end.timetz().replace(tzinfo=None) > self._calendar.meeting_end
@@ -835,21 +1515,115 @@ class TwoWayAIVoiceService:
     <Say voice="Polly.Aditi" language="en-IN">Thank you for your time. Please contact the college at {safe_ph}. Goodbye.</Say>
 </Response>"""
 
+        # Persist every recognized parent turn before routing it. This history is
+        # supplied to the next interpretation so the agent does not repeat a
+        # question that the parent has already answered.
+        state.messages.append({"role": "user", "content": parent_speech})
+        state.turn_count += 1
+
+        if _declines_further_help(parent_speech):
+            state.awaiting_meeting_consent = False
+            state.stage = STAGE_FAREWELL
+            spoken = "I understand. We'll continue monitoring the concern. Thank you for your time, and goodbye."
+            state.ended = True
+            return self._tracked_twiml(state, spoken, True)
+
+        if (
+            not state.booking
+            and state.awaiting_meeting_consent
+            and _is_short_affirmative(parent_speech)
+        ):
+            state.parent_requested_meeting = True
+            state.awaiting_meeting_consent = False
+            state.pending_action = "schedule_meeting"
+            spoken = self._offer_available_slots(state)
+            return self._tracked_twiml(state, spoken, False)
+
+        # Resolve deterministic calendar questions before any network AI call.
+        if _asks_current_date(parent_speech):
+            spoken = f"Today is {self._calendar.now().strftime('%A, %B %d, %Y').replace(' 0', ' ')}."
+            return self._tracked_twiml(state, spoken, False)
+
         if state.booking and _wants_to_cancel(parent_speech):
             spoken = self._handle_cancellation(state)
-            return self._twiml(spoken, False)
+            return self._tracked_twiml(state, spoken, False)
+
+        if _asks_meeting_availability(parent_speech):
+            parsed_request = _parse_meeting_request(parent_speech, self._calendar.timezone)
+            state.parent_requested_meeting = True
+            if parsed_request.range_start and parsed_request.range_end:
+                spoken = self._offer_slots_for_range(
+                    state, parsed_request.range_start, parsed_request.range_end,
+                    for_reschedule=bool(state.booking),
+                )
+                return self._tracked_twiml(state, spoken, False)
+            if parsed_request.date and not parsed_request.time:
+                spoken = self._offer_slots_for_date(
+                    state, parsed_request.date, for_reschedule=bool(state.booking)
+                )
+                return self._tracked_twiml(state, spoken, False)
+
+        booking_change = _booking_change_from_temporal_reference(
+            state, parent_speech, self._calendar.timezone
+        )
+        if booking_change:
+            state.parent_requested_meeting = True
+            if booking_change.range_start and booking_change.range_end:
+                spoken = self._offer_slots_for_range(
+                    state, booking_change.range_start, booking_change.range_end,
+                    for_reschedule=True,
+                )
+            elif booking_change.date and not booking_change.time:
+                spoken = self._offer_slots_for_date(
+                    state, booking_change.date, for_reschedule=True
+                )
+            else:
+                spoken = self._handle_reschedule(state, parent_speech)
+            return self._tracked_twiml(state, spoken, False)
+
+        if state.stage == STAGE_MEETING and _is_short_affirmative(parent_speech):
+            spoken = self._handle_meeting_choice(state, parent_speech)
+            return self._tracked_twiml(state, spoken, False)
+
+        if (
+            not state.booking
+            and _is_short_affirmative(parent_speech)
+            and "meeting" in state.last_agent_message.lower()
+        ):
+            state.parent_requested_meeting = True
+            state.pending_action = "schedule_meeting"
+            spoken = self._offer_available_slots(state)
+            return self._tracked_twiml(state, spoken, False)
+
+        understanding = self._interpret_parent_turn(state, parent_speech)
+        routed = self._route_contextual_action(state, parent_speech, understanding)
+        if routed:
+            spoken, end_call = routed
+            return self._tracked_twiml(state, spoken, end_call)
+
+        if understanding.interpreted:
+            return self._contextual_reply_twiml(
+                state, parent_speech, understanding
+            )
+
+        return self._contextual_reply_twiml(state, parent_speech, understanding)
+
+        # High-precision legacy checks remain as a fail-safe if interpretation fails.
+        if state.booking and _wants_to_cancel(parent_speech):
+            spoken = self._handle_cancellation(state)
+            return self._tracked_twiml(state, spoken, False)
 
         if state.stage == STAGE_RESCHEDULE or (
             state.booking and _wants_to_reschedule(parent_speech)
         ):
             spoken = self._handle_reschedule(state, parent_speech)
-            return self._twiml(spoken, False)
+            return self._tracked_twiml(state, spoken, False)
 
         if state.stage == STAGE_MEETING:
             spoken = self._handle_meeting_choice(state, parent_speech)
             print(f"  [P] Parent : \"{parent_speech}\"")
             print(f"  [CAL] Priya: \"{spoken[:90]}...\"")
-            return self._twiml(spoken, False)
+            return self._tracked_twiml(state, spoken, False)
 
         # Stage-aware closing detection
         if _parent_wants_to_end(parent_speech, state.stage):
@@ -888,6 +1662,8 @@ class TwoWayAIVoiceService:
         if end_call:
             state.ended = True
 
+        state.last_agent_message = spoken
+
         print(f"  [P] Parent : \"{parent_speech}\"")
         print(f"  [AI] Priya  : \"{spoken[:90]}...\"")
         print(f"  [INFO] Turn: {state.turn_count} | Stage: {state.stage} | End: {end_call}")
@@ -904,7 +1680,6 @@ class TwoWayAIVoiceService:
             )
 
         state = ConversationState(payload, self._school, self._phone)
-        self._conversations[payload.registration] = state
         print(f"[OK] Ready: {payload.student_name} [{payload.dimension.upper()} / {payload.risk_level}]")
 
         twiml = self._opening_twiml(payload)
@@ -916,6 +1691,8 @@ class TwoWayAIVoiceService:
                 from_=self._from_number,
                 twiml=twiml
             )
+            # CallSid is unique even when the same student has overlapping calls.
+            self._conversations[call.sid] = state
             self.calls_made.append(payload)
             print(f"   [OK] SID: {call.sid}\n")
             return NotificationResult(

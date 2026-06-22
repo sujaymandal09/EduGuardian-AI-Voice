@@ -1,8 +1,9 @@
 import tempfile
 import threading
 import unittest
-from datetime import datetime
+from datetime import date, datetime
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 from core.models import CallPayload
@@ -13,6 +14,7 @@ from services.twilio_groq_voice import (
     STAGE_MEETING,
     TwoWayAIVoiceService,
     _parse_meeting_request,
+    _wants_to_cancel,
 )
 
 
@@ -59,6 +61,55 @@ class CalendarServiceTests(unittest.TestCase):
         self.calendar._now_fn = lambda: datetime(2026, 6, 20, 8, 0, tzinfo=self.zone)
         slot = self.calendar.find_available_slots("teacher@example.com", limit=1)[0]
         self.assertEqual(slot.start.weekday(), 0)
+
+    def test_natural_date_corrections_and_ranges_are_parsed(self):
+        corrected = _parse_meeting_request(
+            "Not Tuesday, Wednesday instead", self.zone, self.now
+        )
+        next_week = _parse_meeting_request("Sometime next week", self.zone, self.now)
+        later_week = _parse_meeting_request("The week after next", self.zone, self.now)
+        next_month = _parse_meeting_request("Try next month", self.zone, self.now)
+
+        self.assertEqual(corrected.date, date(2026, 6, 24))
+        self.assertEqual((next_week.range_start, next_week.range_end), (
+            date(2026, 6, 29), date(2026, 7, 5)
+        ))
+        self.assertEqual((later_week.range_start, later_week.range_end), (
+            date(2026, 7, 6), date(2026, 7, 12)
+        ))
+        self.assertEqual((next_month.range_start, next_month.range_end), (
+            date(2026, 7, 1), date(2026, 7, 31)
+        ))
+        self.assertTrue(_wants_to_cancel("Please cancel it"))
+
+    def test_make_call_isolates_conversations_by_call_sid(self):
+        service = object.__new__(TwoWayAIVoiceService)
+        service._twilio_ready = True
+        service._school = "Test School"
+        service._phone = "12345"
+        service._ngrok_url = "https://example.test"
+        service._from_number = "+910000000099"
+        service._conversations = {}
+        service.calls_made = []
+        service._client = MagicMock()
+        service._client.calls.create.side_effect = [
+            SimpleNamespace(sid="CA-DUMMY-1"),
+            SimpleNamespace(sid="CA-DUMMY-2"),
+        ]
+        payload = CallPayload(
+            to_number="+910000000000", registration="REG-SAME",
+            student_name="Aarav", parent_name="Mrs Sharma",
+            dimension="attendance", risk_level="HIGH", details="Low attendance",
+        )
+
+        service.make_call(payload)
+        service.make_call(payload)
+
+        self.assertEqual(set(service._conversations), {"CA-DUMMY-1", "CA-DUMMY-2"})
+        self.assertIsNot(
+            service._conversations["CA-DUMMY-1"],
+            service._conversations["CA-DUMMY-2"],
+        )
 
     def test_time_outside_meeting_hours_is_rejected(self):
         start = datetime(2026, 6, 22, 14, 0, tzinfo=self.zone)
@@ -151,7 +202,7 @@ class CalendarServiceTests(unittest.TestCase):
         ambiguous = service._clarify_meeting_request(state, "What is the date and time?")
 
         self.assertIn("outside the teacher's working days", sunday)
-        self.assertEqual(ambiguous, "What day and time would you like to schedule the meeting?")
+        self.assertIn("Please choose one of these times", ambiguous)
 
         state.stage = STAGE_MEETING
         sunday_with_time = service._handle_meeting_choice(state, "Sunday at 10 AM")
@@ -214,6 +265,31 @@ class CalendarServiceTests(unittest.TestCase):
         events = self.calendar._read_events()
         self.assertEqual(len(events), 1)
         self.assertEqual(datetime.fromisoformat(events[0]["start"]).hour, 11)
+
+    def test_fallback_reschedule_uses_destination_time_and_existing_date(self):
+        payload = CallPayload(
+            to_number="+910000000000", registration="REG-FALLBACK",
+            student_name="Neel Banerjee", parent_name="Mr Banerjee",
+            dimension="attendance", risk_level="HIGH", details="Low attendance",
+            teacher_id="teacher@example.com",
+        )
+        state = ConversationState(payload, "Test School", "12345")
+        original = self.calendar.find_available_slots(payload.teacher_id)[1]
+        state.booking = self.calendar.book_meeting(
+            payload.teacher_id, original, student_name=payload.student_name,
+            parent_name=payload.parent_name, reason=payload.dimension,
+        )
+        service = object.__new__(TwoWayAIVoiceService)
+        service._calendar = self.calendar
+        service._phone = "12345"
+
+        reply = service._handle_reschedule(
+            state, "I wanted to schedule my 9:30 AM meeting to 11:30 AM."
+        )
+
+        self.assertIn("moved to", reply)
+        self.assertEqual(state.booking.start.date(), original.start.date())
+        self.assertEqual((state.booking.start.hour, state.booking.start.minute), (11, 30))
 
     def test_google_reschedule_patches_original_event_without_inserting(self):
         google = object.__new__(GoogleCalendarService)

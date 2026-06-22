@@ -33,6 +33,59 @@ address. Different teachers can later be supplied per `CallPayload.teacher_id`.
 
 ## Scheduling behavior
 
+Action-like parent turns pass through a contextual intent interpreter using Groq
+JSON mode. The interpreter receives the conversation stage, last agent message,
+active booking, offered slots, pending action, recent turns, current date, and
+timezone. It returns a validated intent and scheduling entities but has no
+authority to modify Google Calendar. Ordinary discussion skips the extra routing
+request to keep voice webhooks within Twilio's response deadline.
+
+Calendar changes remain deterministic: Python validates the interpreted action,
+checks policy and live availability, executes the calendar operation, and only
+then produces a confirmation. Low-confidence actions cause a clarification
+question. Existing phrase and date parsers remain only as an availability
+fallback when contextual interpretation fails.
+
+If a parent says they are busy but asks the teacher to be quick, the interpreter
+uses `available_briefly`: the agent gives a concise concern summary instead of
+ending the call. Brief mode remains active for later turns, preventing additional
+exploratory questions. High-risk summaries ask whether the parent wants the
+earliest meeting options.
+
+Groq JSON output accepts null scheduling entities and is validated locally. The
+older tool-call mode remains available for testing, with JSON mode as its fallback.
+
+Current-date questions are answered directly from the configured school timezone.
+Day-of-month requests such as `meetings on the 23rd` or `meetings at 23` resolve
+to a calendar date and never to 23:00.
+
+Meeting windows are risk-based and enforced in Python:
+
+- High risk: offer verified slots within the next two calendar days. Later
+  requests are directed to the school.
+- Medium risk: offer slots only after the parent asks for a meeting, within the
+  next seven calendar days. Later requests are directed to the school.
+- Low risk: do not automatically schedule; direct exceptional requests to the
+  school.
+
+Meeting turns are interpreted with the full conversation state, including the
+active booking, previously offered choices, and the teacher's verified calendar.
+Natural confirmations such as "the earliest one suits us" select an offered slot;
+date corrections such as "not Tuesday, Wednesday instead" use the corrected day.
+Relative ranges including next week, the week after next, and next month are
+resolved before the risk window is enforced. Rescheduling updates the original
+calendar event instead of creating a second meeting.
+
+A date-only move, such as Monday to Tuesday, does not modify the existing event.
+It first offers the teacher's free times on Tuesday and patches the original event
+only after the parent selects one.
+
+After a booking, a short date or time correction such as `Tuesday` or `11 AM
+instead` is treated as a reschedule even when the parent does not repeat the word
+`reschedule`. Short affirmations such as `sure` book automatically when exactly
+one slot is pending; when several slots are available, the agent asks the parent
+to choose one rather than guessing.
+
 The voice service supports creating, rescheduling, and cancelling meetings during
 the same call. A reschedule updates the original Google Calendar event; it does
 not create a second event. Every create or move rechecks availability immediately
