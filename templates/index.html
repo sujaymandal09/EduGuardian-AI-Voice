@@ -3,235 +3,155 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Attendance Guardian - Teacher Dashboard</title>
+    <title>{{ school_name }} Dashboard</title>
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@tabler/icons-webfont@latest/tabler-icons.min.css">
     <style>
-        * {
-            margin: 0;
-            padding: 0;
-            box-sizing: border-box;
+        *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+        :root {
+            --bg: #ebe8f4; --surface: rgba(252, 250, 248, .92); --surface-2: #f5f2f6;
+            --border: rgba(52, 45, 74, .11); --border-strong: rgba(52, 45, 74, .17);
+            --text: #11173f; --secondary: #666785; --muted: #797a99;
+            --purple-dark: #3c3489; --purple-mid: #534ab7; --purple-light: #eeedfe;
+            --amber-light: #faeeda; --amber-text: #854f0b;
+            --coral-light: #faece7; --coral-text: #993c1d;
+            --teal-light: #e1f5ee; --teal-text: #0f6e56;
+            --red-light: #fcebeb; --red-text: #a32d2d;
         }
-
         body {
-            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
-            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-            min-height: 100vh;
-            padding: 20px;
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+            color: var(--text); min-height: 100vh; padding: 18px;
+            background:
+                radial-gradient(circle at 8% 8%, rgba(255,255,255,.9), transparent 24%),
+                linear-gradient(135deg, #f3f1fb 0%, #eceaf7 100%);
         }
-
-        .container {
-            max-width: 800px;
-            margin: 0 auto;
-            background: white;
-            border-radius: 20px;
-            box-shadow: 0 20px 60px rgba(0,0,0,0.3);
-            overflow: hidden;
+        .dashboard {
+            position: relative; isolation: isolate; overflow: hidden;
+            width: 100%; max-width: 1080px; margin: 0 auto; padding: 0 54px 38px;
+            background:
+                linear-gradient(rgba(235,232,244,.90), rgba(241,238,246,.92)),
+                repeating-linear-gradient(45deg, rgba(50,40,80,.018) 0 1px, transparent 1px 4px);
+            border: 1px solid rgba(255,255,255,.92); border-radius: 24px;
+            box-shadow: 0 18px 50px rgba(37,31,68,.13), 0 2px 7px rgba(37,31,68,.12);
         }
-
-        .header {
-            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-            color: white;
-            padding: 30px;
-            text-align: center;
+        .hero { position: relative; text-align: center; min-height: 300px; padding: 48px 1rem 100px; margin: 0 -54px 0; overflow: hidden; }
+        .hero::before { content: ""; position: absolute; z-index: -2; right: 12%; bottom: 42px; width: 112px; height: 112px; border-radius: 50%; background: radial-gradient(circle at 35% 35%, #fff6da, #f6d996 72%); opacity: .85; }
+        .hero::after { content: ""; position: absolute; z-index: -1; left: -5%; right: -5%; bottom: -58px; height: 155px; background: #ebe9f2; border-radius: 50% 44% 0 0 / 45% 36% 0 0; box-shadow: 350px -16px 0 0 #f2f0f4, 690px 9px 0 0 #e4e1ed; opacity: .88; }
+        .hero-icon { width: 86px; height: 86px; border-radius: 24px; background: linear-gradient(145deg, #6256c4, #362d87); display: grid; place-items: center; margin: 0 auto 20px; border: 1px solid #312878; box-shadow: inset 0 1px 1px rgba(255,255,255,.55), 0 8px 16px rgba(54,45,135,.24); }
+        .hero-icon i { color: #fff; font-size: 45px; }
+        .hero h1 { font-family: Georgia, "Times New Roman", serif; font-size: clamp(32px, 4vw, 43px); letter-spacing: -.025em; margin-bottom: 12px; }
+        .hero p { color: var(--muted); font-family: Georgia, "Times New Roman", serif; font-size: 18px; font-style: italic; }
+        .stats { display: grid; grid-template-columns: repeat(3, 1fr); gap: 20px; margin: 0 0 26px; }
+        .card, .risk { background: var(--surface); border: 1px solid var(--border); border-radius: 19px; box-shadow: 0 8px 18px rgba(35,30,57,.08), 0 2px 3px rgba(35,30,57,.09); }
+        .stat { min-height: 154px; padding: 27px 25px; display: grid; grid-template-columns: 64px 1fr; grid-template-rows: auto auto auto; column-gap: 22px; align-content: center; }
+        .stat-icon { grid-row: 1 / 4; align-self: start; width: 64px; height: 64px; display: grid; place-items: center; border-radius: 50%; font-size: 31px; box-shadow: 0 5px 12px rgba(42,34,75,.12), inset 0 0 0 1px rgba(75,61,130,.08); }
+        .stat-label { color: var(--muted); font-size: 13px; font-weight: 700; letter-spacing: .07em; text-transform: uppercase; margin-bottom: 4px; }
+        .stat-value { font-family: Georgia, "Times New Roman", serif; font-size: 44px; font-weight: 500; line-height: 1; }
+        .stat-detail { color: var(--muted); font-size: 14px; margin-top: 5px; }
+        .students-icon { background: #f1edff; color: #503ca8; } .risk-icon { background: #fff0ed; color: #c53529; } .calls-icon { background: #ebf6f1; color: #087659; }
+        .danger .stat-value { color: var(--red-text); } .success .stat-value { color: var(--teal-text); }
+        .risk { padding: 29px 36px 27px; margin-bottom: 38px; }
+        .risk-header { display: flex; justify-content: space-between; gap: 1rem; margin-bottom: 20px; }
+        .risk-header span:first-child { color: #24243e; font-size: 17px; font-weight: 600; }
+        .risk-header span:last-child { color: var(--muted); font-size: 15px; }
+        .risk-track { height: 14px; display: flex; gap: 4px; background: #e9e6e2; border: 1px solid rgba(50,40,40,.12); border-radius: 8px; overflow: hidden; box-shadow: inset 0 1px 3px rgba(0,0,0,.16), 0 2px 5px rgba(30,20,20,.08); }
+        .risk-segment { height: 100%; min-width: 0; }
+        .risk-legend { display: flex; flex-wrap: wrap; gap: 12px 34px; margin-top: 21px; }
+        .legend { display: flex; align-items: center; gap: 10px; color: var(--muted); font-size: 14px; }
+        .dot { width: 14px; height: 14px; border-radius: 50%; border: 1px solid rgba(0,0,0,.18); box-shadow: 0 2px 3px rgba(0,0,0,.12); }
+        .section-label { color: #737394; font-size: 13px; font-weight: 700; letter-spacing: .09em; text-transform: uppercase; margin: 0 5px 15px; }
+        .analysis-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; margin-bottom: 25px; }
+        .analysis { min-height: 215px; padding: 29px 30px 25px; color: inherit; text-decoration: none; display: grid; grid-template-columns: 76px 1fr; grid-template-rows: auto 1fr auto; column-gap: 23px; transition: border-color .14s, box-shadow .14s, transform .14s; }
+        .analysis:hover, .analysis:focus-visible { border-color: var(--purple-mid); box-shadow: 0 0 0 3px rgba(83, 74, 183, .08); transform: translateY(-1px); outline: none; }
+        .analysis-top { display: contents; }
+        .analysis-icon { grid-row: 1 / 3; width: 72px; height: 72px; border-radius: 17px; display: grid; place-items: center; box-shadow: 0 5px 10px rgba(40,32,60,.11), inset 0 0 0 1px rgba(70,55,110,.08); }
+        .analysis-icon i { font-size: 35px; }
+        .purple { background: var(--purple-light); color: var(--purple-dark); }
+        .amber { background: var(--amber-light); color: var(--amber-text); }
+        .coral { background: var(--coral-light); color: var(--coral-text); }
+        .teal { background: var(--teal-light); color: var(--teal-text); }
+        .analysis-name { align-self: center; font-size: 18px; font-weight: 650; }
+        .analysis-desc { color: var(--muted); font-size: 15px; line-height: 1.7; padding-top: 9px; }
+        .analysis-cta { grid-column: 1 / 3; align-self: end; width: fit-content; border-radius: 10px; padding: 9px 17px; font-size: 14px; font-weight: 600; box-shadow: 0 3px 7px rgba(40,32,60,.12), inset 0 0 0 1px rgba(70,55,110,.08); }
+        .divider { height: 1px; background: var(--border); margin: 22px 5px 20px; }
+        .actions { display: grid; grid-template-columns: repeat(3, 1fr); gap: 20px; }
+        .action { display: flex; align-items: center; justify-content: center; gap: 12px; min-height: 76px; padding: 14px; border: 1px solid var(--border-strong); border-radius: 15px; background: var(--surface); color: #34344e; text-decoration: none; text-align: center; font-size: 16px; font-weight: 600; box-shadow: 0 5px 12px rgba(35,30,57,.08); transition: background .13s, border-color .13s, transform .13s; }
+        .action i { font-size: 23px; } .action:hover { transform: translateY(-1px); }
+        .action:hover { background: var(--surface-2); } .action.primary { background: var(--purple-dark); border-color: var(--purple-dark); color: #fff; }
+        .action.primary:hover { background: var(--purple-mid); } .action.danger { color: var(--red-text); border-color: #f7c1c1; }
+        .action.danger:hover { background: var(--red-light); }
+        .alert { padding: 12px 14px; border-radius: 8px; margin-bottom: 1rem; font-size: 13px; }
+        .alert-success { background: var(--teal-light); color: var(--teal-text); }
+        .alert-warning, .alert-error { background: var(--amber-light); color: var(--amber-text); }
+        .alert-danger { background: var(--red-light); color: var(--red-text); }
+        @media (max-width: 780px) {
+            body { padding: 10px; }
+            .dashboard { padding: 0 20px 25px; border-radius: 18px; }
+            .hero { min-height: 245px; margin: 0 -20px; padding: 34px 1rem 78px; }
+            .hero-icon { width: 68px; height: 68px; border-radius: 19px; margin-bottom: 15px; }
+            .hero-icon i { font-size: 36px; } .hero p { font-size: 15px; }
+            .stats { grid-template-columns: 1fr; gap: 12px; }
+            .stat { min-height: 118px; padding: 20px; grid-template-columns: 58px 1fr; column-gap: 17px; }
+            .stat-icon { width: 54px; height: 54px; font-size: 26px; }
+            .stat-value { font-size: 36px; }
+            .risk { padding: 22px 20px; margin-bottom: 28px; }
+            .analysis-grid { grid-template-columns: 1fr; }
+            .analysis { min-height: 200px; padding: 24px 22px; }
+            .actions { grid-template-columns: 1fr; gap: 10px; }
+            .action { min-height: 58px; }
+            .risk-header { flex-direction: column; gap: 2px; }
         }
-
-        .header h1 {
-            font-size: 2.5em;
-            margin-bottom: 10px;
-        }
-
-        .header p {
-            font-size: 1.1em;
-            opacity: 0.9;
-        }
-
-        .content {
-            padding: 40px;
-        }
-
-        .stats {
-            display: grid;
-            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
-            gap: 20px;
-            margin-bottom: 40px;
-        }
-
-        .stat-card {
-            background: #f8f9fa;
-            padding: 20px;
-            border-radius: 10px;
-            text-align: center;
-            border: 2px solid #e9ecef;
-            transition: transform 0.3s;
-        }
-
-        .stat-card:hover {
-            transform: translateY(-5px);
-            box-shadow: 0 10px 20px rgba(0,0,0,0.1);
-        }
-
-        .stat-card .number {
-            font-size: 2.5em;
-            font-weight: bold;
-            color: #667eea;
-        }
-
-        .stat-card .label {
-            color: #6c757d;
-            margin-top: 5px;
-        }
-
-        .menu {
-            display: grid;
-            gap: 15px;
-        }
-
-        .menu-item {
-            display: flex;
-            align-items: center;
-            padding: 20px;
-            background: #f8f9fa;
-            border-radius: 10px;
-            text-decoration: none;
-            color: #333;
-            transition: all 0.3s;
-            border: 2px solid transparent;
-        }
-
-        .menu-item:hover {
-            background: #667eea;
-            color: white;
-            transform: translateX(10px);
-            border-color: #764ba2;
-        }
-
-        .menu-item .icon {
-            font-size: 2em;
-            margin-right: 20px;
-        }
-
-        .menu-item .text h3 {
-            margin-bottom: 5px;
-        }
-
-        .menu-item .text p {
-            font-size: 0.9em;
-            opacity: 0.8;
-        }
-
-        .btn {
-            display: inline-block;
-            padding: 12px 30px;
-            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-            color: white;
-            text-decoration: none;
-            border-radius: 25px;
-            border: none;
-            cursor: pointer;
-            font-size: 1em;
-            transition: transform 0.3s;
-        }
-
-        .btn:hover {
-            transform: scale(1.05);
-        }
-
-        .btn-danger {
-            background: linear-gradient(135deg, #f56565 0%, #ed64a6 100%);
-        }
-
-        .alert {
-            padding: 15px;
-            border-radius: 10px;
-            margin-bottom: 20px;
-        }
-
-        .alert-success {
-            background: #c6f6d5;
-            color: #22543d;
-            border: 1px solid #9ae6b4;
-        }
-
-        .alert-warning {
-            background: #fefcbf;
-            color: #744210;
-            border: 1px solid #f6e05e;
-        }
-
-        .alert-danger {
-            background: #fed7d7;
-            color: #742a2a;
-            border: 1px solid #fc8181;
+        @media (max-width: 420px) {
+            .analysis { grid-template-columns: 58px 1fr; column-gap: 15px; }
+            .analysis-icon { width: 56px; height: 56px; border-radius: 14px; }
+            .analysis-icon i { font-size: 28px; }
+            .analysis-name { font-size: 16px; }
         }
     </style>
 </head>
 <body>
-    <div class="container">
-        <div class="header">
-            <h1>📚 Attendance Guardian</h1>
-            <p>Student Risk Monitoring & Parent Notification System</p>
-        </div>
+{% set total = total_students if total_students else 0 %}
+{% set high = risk_counts.get('HIGH', 0) %}
+{% set medium = risk_counts.get('MEDIUM', 0) %}
+{% set low = risk_counts.get('LOW', 0) %}
+<main class="dashboard">
+    <header class="hero">
+        <div class="hero-icon"><i class="ti ti-shield-check" aria-hidden="true"></i></div>
+        <h1>{{ school_name }}</h1>
+        <p>Watching over every student, so no one gets left behind.</p>
+    </header>
 
-        <div class="content">
-            <div class="stats">
-                <div class="stat-card">
-                    <div class="number">{{ total_students }}</div>
-                    <div class="label">Total Students</div>
-                </div>
-                <div class="stat-card">
-                    <div class="number">{{ at_risk_count }}</div>
-                    <div class="label">At Risk</div>
-                </div>
-                <div class="stat-card">
-                    <div class="number">{{ calls_made }}</div>
-                    <div class="label">Calls Made</div>
-                </div>
-            </div>
+    <section class="stats" aria-label="Student overview">
+        <div class="card stat"><span class="stat-icon students-icon"><i class="ti ti-users"></i></span><div class="stat-label">Total students</div><div class="stat-value">{{ total_students }}</div><div class="stat-detail">Active this semester</div></div>
+        <div class="card stat danger"><span class="stat-icon risk-icon"><i class="ti ti-alert-triangle"></i></span><div class="stat-label">At risk</div><div class="stat-value">{{ at_risk_count }}</div><div class="stat-detail">Across all dimensions</div></div>
+        <div class="card stat success"><span class="stat-icon calls-icon"><i class="ti ti-phone"></i></span><div class="stat-label">Calls made</div><div class="stat-value">{{ calls_made }}</div><div class="stat-detail">{% if calls_made %}Recorded this session{% else %}No calls yet today{% endif %}</div></div>
+    </section>
 
-            {% if message %}
-            <div class="alert alert-{{ message_type }}">{{ message }}</div>
+    {% with messages = get_flashed_messages(with_categories=true) %}
+        {% for category, message in messages %}<div class="alert alert-{{ category }}" role="status">{{ message }}</div>{% endfor %}
+    {% endwith %}
+
+    <section class="risk" aria-label="Risk distribution">
+        <div class="risk-header"><span>Risk distribution</span><span>{{ ((at_risk_count / total * 100) | round | int) if total else 0 }}% of cohort flagged</span></div>
+        <div class="risk-track" aria-label="High {{ high }}, medium {{ medium }}, low {{ low }}">
+            {% if at_risk_count %}
+            <span class="risk-segment" style="width:{{ high / at_risk_count * 100 }}%;background:#a32d2d"></span>
+            <span class="risk-segment" style="width:{{ medium / at_risk_count * 100 }}%;background:#ba7517"></span>
+            <span class="risk-segment" style="width:{{ low / at_risk_count * 100 }}%;background:#0f6e56"></span>
             {% endif %}
-
-            <h2 style="margin-bottom: 20px;">Select Analysis Type</h2>
-            
-            <div class="menu">
-                <a href="/analyze/attendance" class="menu-item">
-                    <span class="icon">📊</span>
-                    <div class="text">
-                        <h3>Attendance Risk Analysis</h3>
-                        <p>Check students with low attendance or consecutive absences</p>
-                    </div>
-                </a>
-
-                <a href="/analyze/performance" class="menu-item">
-                    <span class="icon">📝</span>
-                    <div class="text">
-                        <h3>Academic Performance</h3>
-                        <p>Identify students struggling academically</p>
-                    </div>
-                </a>
-
-                <a href="/analyze/behavior" class="menu-item">
-                    <span class="icon">⚠️</span>
-                    <div class="text">
-                        <h3>Behavior Issues</h3>
-                        <p>Monitor students with behavioral concerns</p>
-                    </div>
-                </a>
-
-                <a href="/analyze/all" class="menu-item">
-                    <span class="icon">🔄</span>
-                    <div class="text">
-                        <h3>Run All Checks</h3>
-                        <p>Complete analysis across all dimensions</p>
-                    </div>
-                </a>
-            </div>
-
-            <div style="margin-top: 30px; text-align: center;">
-                <a href="/upload" class="btn">📂 Upload New CSV</a>
-                <a href="/reset" class="btn btn-danger" style="margin-left: 10px;">🔄 Reset Calls</a>
-            </div>
         </div>
-    </div>
+        <div class="risk-legend"><span class="legend"><span class="dot" style="background:#a32d2d"></span>High - {{ high }}</span><span class="legend"><span class="dot" style="background:#ba7517"></span>Medium - {{ medium }}</span><span class="legend"><span class="dot" style="background:#0f6e56"></span>Low - {{ low }}</span></div>
+    </section>
+
+    <div class="section-label">Select analysis type</div>
+    <section class="analysis-grid">
+        <a href="{{ url_for('analyze', dimension='attendance') }}" class="card analysis"><div class="analysis-top"><span class="analysis-icon purple"><i class="ti ti-chart-bar"></i></span><span class="analysis-name">Attendance risk</span></div><p class="analysis-desc">Flag students with low attendance or consecutive absences.</p><span class="analysis-cta purple"><i class="ti ti-arrow-right"></i> Run check</span></a>
+        <a href="{{ url_for('analyze', dimension='performance') }}" class="card analysis"><div class="analysis-top"><span class="analysis-icon amber"><i class="ti ti-pencil"></i></span><span class="analysis-name">Academic performance</span></div><p class="analysis-desc">Identify students struggling with grades or exam readiness.</p><span class="analysis-cta amber"><i class="ti ti-arrow-right"></i> Run check</span></a>
+        <a href="{{ url_for('analyze', dimension='behavior') }}" class="card analysis"><div class="analysis-top"><span class="analysis-icon coral"><i class="ti ti-alert-circle"></i></span><span class="analysis-name">Behaviour issues</span></div><p class="analysis-desc">Monitor students with reported behavioural incidents.</p><span class="analysis-cta coral"><i class="ti ti-arrow-right"></i> Run check</span></a>
+        <a href="{{ url_for('analyze', dimension='all') }}" class="card analysis"><div class="analysis-top"><span class="analysis-icon teal"><i class="ti ti-refresh"></i></span><span class="analysis-name">Run all checks</span></div><p class="analysis-desc">Complete analysis across attendance, grades, and behaviour.</p><span class="analysis-cta teal"><i class="ti ti-arrow-right"></i> Run all</span></a>
+    </section>
+
+    <div class="divider"></div><div class="section-label">Quick actions</div>
+    <nav class="actions" aria-label="Quick actions"><a href="{{ url_for('call_history') }}" class="action primary"><i class="ti ti-phone-call"></i> Call Summary</a><a href="{{ url_for('upload') }}" class="action"><i class="ti ti-file-upload"></i> Upload new CSV</a><a href="{{ url_for('reset') }}" class="action danger"><i class="ti ti-refresh"></i> Reset calls</a></nav>
+</main>
 </body>
 </html>
