@@ -95,20 +95,30 @@ def load_students():
 @app.route('/')
 def index():
     students = load_students()
-    at_risk_count = 0
+    risk_counts = {"HIGH": 0, "MEDIUM": 0, "LOW": 0}
     if students:
         agents = [AttendanceAgent(), PerformanceAgent(), BehaviorAgent()]
-        at_risk_set = set()
+        highest_risk_by_student = {}
+        risk_rank = {"LOW": 1, "MEDIUM": 2, "HIGH": 3}
         for agent in agents:
             for r in agent.find_at_risk(students):
-                at_risk_set.add(r.registration)
-        at_risk_count = len(at_risk_set)
+                level = str(r.risk_level).upper()
+                current = highest_risk_by_student.get(r.registration)
+                if level in risk_rank and (
+                    current is None or risk_rank[level] > risk_rank[current]
+                ):
+                    highest_risk_by_student[r.registration] = level
+        for level in highest_risk_by_student.values():
+            risk_counts[level] += 1
+    at_risk_count = sum(risk_counts.values())
     voice = get_voice_service()
     calls = len(voice.calls_made) if hasattr(voice, 'calls_made') else 0
     return render_template('index.html',
                            total_students=len(students),
                            at_risk_count=at_risk_count,
-                           calls_made=calls)
+                           calls_made=calls,
+                           risk_counts=risk_counts,
+                           school_name=os.getenv("SCHOOL_NAME", "EduGuardian"))
 
 
 @app.route('/analyze/<dimension>')
