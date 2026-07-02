@@ -3,265 +3,65 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Analysis Results - Attendance Guardian</title>
+    <title>{% if dimension == 'attendance' %}Attendance Risk{% elif dimension == 'performance' %}Academic Performance{% elif dimension == 'behavior' %}Behaviour Issues{% else %}Complete Analysis{% endif %} - EduGuardian</title>
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@tabler/icons-webfont@latest/tabler-icons.min.css">
     <style>
-        * { margin: 0; padding: 0; box-sizing: border-box; }
-        
-        body {
-            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
-            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-            min-height: 100vh;
-            padding: 20px;
-        }
-
-        .container {
-            max-width: 900px;
-            margin: 0 auto;
-            background: white;
-            border-radius: 20px;
-            box-shadow: 0 20px 60px rgba(0,0,0,0.3);
-            overflow: hidden;
-        }
-
-        .header {
-            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-            color: white;
-            padding: 30px;
-            text-align: center;
-        }
-
-        .header h1 { font-size: 2em; margin-bottom: 10px; }
-        
-        .badge {
-            display: inline-block;
-            padding: 8px 25px;
-            border-radius: 20px;
-            font-weight: bold;
-            font-size: 1.1em;
-            margin-top: 10px;
-        }
-        .badge-HIGH { background: #f56565; }
-        .badge-MEDIUM { background: #ed8936; }
-        .badge-LOW { background: #48bb78; }
-
-        .content { padding: 30px; }
-
-        .selection-bar {
-            background: #f8f9fa;
-            padding: 15px 20px;
-            border-radius: 10px;
-            margin-bottom: 20px;
-            display: flex;
-            justify-content: space-between;
-            align-items: center;
-        }
-
-        .student-card {
-            background: #f8f9fa;
-            border-radius: 12px;
-            padding: 20px;
-            margin-bottom: 15px;
-            border-left: 5px solid #667eea;
-            position: relative;
-        }
-
-        .student-card.high { border-left-color: #f56565; }
-        .student-card.medium { border-left-color: #ed8936; }
-
-        .student-card.selected {
-            background: #ebf8ff;
-            border: 2px solid #667eea;
-        }
-
-        .student-checkbox {
-            position: absolute;
-            top: 20px;
-            right: 20px;
-            width: 20px;
-            height: 20px;
-            cursor: pointer;
-        }
-
-        .student-name {
-            font-size: 1.2em;
-            font-weight: bold;
-            color: #2d3748;
-        }
-
-        .risk-badge {
-            display: inline-block;
-            padding: 4px 12px;
-            border-radius: 15px;
-            color: white;
-            font-size: 0.85em;
-            font-weight: bold;
-            margin-left: 10px;
-        }
-        .risk-HIGH { background: #f56565; }
-        .risk-MEDIUM { background: #ed8936; }
-
-        .student-info {
-            display: grid;
-            grid-template-columns: repeat(3, 1fr);
-            gap: 10px;
-            margin: 10px 0;
-            font-size: 0.9em;
-        }
-
-        .info-item {
-            background: white;
-            padding: 8px 12px;
-            border-radius: 6px;
-        }
-
-        .info-label { color: #718096; font-size: 0.8em; }
-        .info-value { color: #2d3748; font-weight: 600; }
-
-        .details { margin-top: 10px; color: #4a5568; }
-        .action { color: #c53030; font-weight: 600; margin-top: 5px; }
-
-        .actions-bar {
-            position: sticky;
-            bottom: 20px;
-            background: white;
-            padding: 20px;
-            border-radius: 15px;
-            box-shadow: 0 -5px 20px rgba(0,0,0,0.1);
-            text-align: center;
-            margin-top: 20px;
-        }
-
-        .btn {
-            display: inline-block;
-            padding: 12px 30px;
-            background: #667eea;
-            color: white;
-            border: none;
-            border-radius: 25px;
-            cursor: pointer;
-            font-size: 1em;
-            text-decoration: none;
-            font-weight: 600;
-            margin: 5px;
-        }
-        .btn:hover { transform: scale(1.05); }
-        .btn:disabled { opacity: 0.5; cursor: not-allowed; }
-        .btn-call { background: #48bb78; font-size: 1.1em; padding: 15px 40px; }
-        .btn-back { background: #718096; }
-
-        .no-results {
-            text-align: center;
-            padding: 60px;
-            font-size: 1.2em;
-            color: #718096;
-        }
+        *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+        :root { --surface:rgba(252,250,248,.93);--soft:#f3f0f5;--border:rgba(52,45,74,.11);--text:#11173f;--secondary:#666785;--muted:#797a99;--purple:#493b9e;--purple-mid:#6256c4;--red:#bd302b;--red-light:#fff0ed;--amber:#b76b0d;--amber-light:#fff5df;--green:#087659;--green-light:#ebf6f1; }
+        body { font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;min-height:100vh;padding:18px;color:var(--text);background:radial-gradient(circle at 8% 8%,rgba(255,255,255,.9),transparent 24%),linear-gradient(135deg,#f3f1fb,#eceaf7); }
+        .container { width:100%;max-width:1080px;margin:0 auto;overflow:hidden;background:linear-gradient(rgba(235,232,244,.90),rgba(241,238,246,.92)),repeating-linear-gradient(45deg,rgba(50,40,80,.018) 0 1px,transparent 1px 4px);border:1px solid rgba(255,255,255,.72);border-radius:24px;box-shadow:0 18px 50px rgba(37,31,68,.13),0 2px 7px rgba(37,31,68,.12); }
+        .header { position:relative;overflow:hidden;padding:46px 35px 42px;text-align:center;border-bottom:1px solid var(--border); }
+        .header::before { content:"";position:absolute;inset:0;background:radial-gradient(circle at 82% 85%,rgba(247,217,150,.35),transparent 14%),linear-gradient(180deg,rgba(255,255,255,.35),transparent); }
+        .header > * { position:relative; }
+        .header-icon { width:68px;height:68px;margin:0 auto 15px;display:grid;place-items:center;border-radius:19px;color:#fff;background:linear-gradient(145deg,var(--purple-mid),#362d87);border:1px solid #312878;box-shadow:inset 0 1px 1px rgba(255,255,255,.55),0 8px 16px rgba(54,45,135,.22); }
+        .header-icon i { font-size:35px; }
+        .header h1 { font-family:Georgia,"Times New Roman",serif;font-size:clamp(30px,4vw,42px);letter-spacing:-.025em; }
+        .summary-badge { display:inline-flex;align-items:center;gap:8px;margin-top:14px;padding:8px 18px;border-radius:999px;font-size:14px;font-weight:700; }
+        .badge-HIGH { background:var(--red-light);color:var(--red);border:1px solid #f2cbc5; }.badge-MEDIUM { background:var(--amber-light);color:var(--amber);border:1px solid #efdcb4; }.badge-LOW { background:var(--green-light);color:var(--green);border:1px solid #cbe4da; }
+        .content { padding:32px 54px 38px; }
+        .selection-bar { position:sticky;top:12px;z-index:5;display:flex;justify-content:space-between;align-items:center;gap:20px;margin-bottom:20px;padding:16px 20px;background:rgba(255,253,250,.94);border:1px solid var(--border);border-radius:14px;box-shadow:0 6px 15px rgba(35,30,57,.08);backdrop-filter:blur(9px); }
+        .selection-bar label { display:flex;align-items:center;gap:10px;cursor:pointer;font-size:14px; }.selection-count{color:var(--muted);font-size:14px;}input[type="checkbox"]{width:20px;height:20px;accent-color:var(--purple);cursor:pointer;}
+        .student-card { position:relative;margin-bottom:18px;padding:25px 26px 23px 30px;background:var(--surface);border:1px solid var(--border);border-left:5px solid var(--green);border-radius:18px;box-shadow:0 7px 16px rgba(35,30,57,.07),0 2px 3px rgba(35,30,57,.07);transition:.15s; }
+        .student-card.high{border-left-color:var(--red)}.student-card.medium{border-left-color:#d98919}.student-card.selected{border-color:var(--purple-mid);border-left-color:var(--purple);background:#fbfaff;box-shadow:0 0 0 3px rgba(83,74,183,.1),0 8px 18px rgba(35,30,57,.09);transform:translateY(-1px)}
+        .student-checkbox{position:absolute;top:25px;right:26px}.student-heading{display:flex;flex-wrap:wrap;align-items:center;gap:10px;padding-right:40px}.student-name{font-family:Georgia,"Times New Roman",serif;font-size:21px}.risk-badge{display:inline-flex;padding:5px 12px;border-radius:999px;font-size:12px;font-weight:800;letter-spacing:.04em}.risk-HIGH{background:var(--red-light);color:var(--red)}.risk-MEDIUM{background:var(--amber-light);color:var(--amber)}.risk-LOW{background:var(--green-light);color:var(--green)}
+        .registration{display:block;margin-top:5px;color:var(--muted);font-size:12px}.student-info{display:grid;grid-template-columns:repeat(3,1fr);gap:12px;margin:17px 0 13px}.info-item{padding:11px 13px;background:var(--soft);border:1px solid rgba(52,45,74,.06);border-radius:10px}.info-label{margin-bottom:3px;color:var(--muted);font-size:11px;text-transform:uppercase;letter-spacing:.05em}.info-value{font-size:14px;font-weight:650;overflow-wrap:anywhere}.details{color:var(--secondary);font-size:14px;line-height:1.6}.recommended{display:flex;align-items:flex-start;gap:7px;margin-top:7px;color:var(--red);font-size:14px;font-weight:650}.recommended i{margin-top:2px}
+        .actions-bar{position:sticky;z-index:6;bottom:14px;display:flex;justify-content:center;gap:12px;margin-top:25px;padding:15px;background:rgba(255,253,250,.94);border:1px solid var(--border);border-radius:16px;box-shadow:0 10px 30px rgba(35,30,57,.15);backdrop-filter:blur(9px)}.btn{display:inline-flex;align-items:center;justify-content:center;gap:9px;min-height:48px;padding:11px 23px;border:1px solid var(--border);border-radius:11px;background:var(--surface);color:var(--secondary);text-decoration:none;font:inherit;font-size:14px;font-weight:700;cursor:pointer;transition:.13s}.btn:hover:not(:disabled){transform:translateY(-1px)}.btn:disabled{opacity:.45;cursor:not-allowed}.btn-call{min-width:215px;color:#fff;background:linear-gradient(145deg,#5b4caf,#3c3489);border-color:#3c3489;box-shadow:0 5px 12px rgba(54,45,135,.22)}
+        .no-results{padding:65px 20px;text-align:center;color:var(--secondary)}.no-results-icon{width:76px;height:76px;display:grid;place-items:center;margin:0 auto 18px;border-radius:22px;background:var(--green-light);color:var(--green);font-size:40px}.no-results h2{margin-bottom:8px;font-family:Georgia,"Times New Roman",serif;color:var(--text);font-size:28px}.no-results .btn{margin-top:22px}
+        @media(max-width:720px){body{padding:10px}.container{border-radius:18px}.header{padding:32px 20px 28px}.content{padding:22px 18px 25px}.student-info{grid-template-columns:1fr;gap:8px}.student-card{padding:22px 20px 20px}.student-checkbox{top:22px;right:20px}.actions-bar{flex-direction:column}.btn,.btn-call{width:100%}}@media(max-width:430px){.selection-bar{align-items:flex-start;flex-direction:column;gap:8px}}
     </style>
 </head>
 <body>
-    <div class="container">
-        <div class="header">
-            <h1>{{ dimension_title }}</h1>
-            <div class="badge badge-{{ highest_risk }}">
-                {{ at_risk|length }} Student(s) at Risk
-            </div>
-        </div>
-
-        <div class="content">
-            {% if at_risk %}
-                <div class="selection-bar">
-                    <label>
-                        <input type="checkbox" id="selectAll" onclick="toggleAll()">
-                        <strong>Select All</strong>
-                    </label>
-                    <span>Selected: <strong id="count">0</strong></span>
-                </div>
-
-                <form id="callForm" action="/call/selective" method="POST">
-                    <input type="hidden" name="dimension" value="{{ dimension }}">
-                    
-                    {% for student in at_risk %}
-                    <div class="student-card {{ student.risk_level|lower }}" id="card-{{ loop.index0 }}">
-                        <input type="checkbox" 
-                               name="selected_students" 
-                               value="{{ loop.index0 }}" 
-                               class="student-checkbox"
-                               onchange="updateCard(this, {{ loop.index0 }})">
-                        
-                        <div class="student-name">
-                            {{ student.student_name }}
-                            <span class="risk-badge risk-{{ student.risk_level }}">{{ student.risk_level }}</span>
-                        </div>
-                        
-                        <small style="color: #718096;">Reg: {{ student.registration }}</small>
-
-                        <div class="student-info">
-                            <div class="info-item">
-                                <div class="info-label">Parent</div>
-                                <div class="info-value">{{ student.parent_name }}</div>
-                            </div>
-                            <div class="info-item">
-                                <div class="info-label">Phone</div>
-                                <div class="info-value">{{ student.parent_phone }}</div>
-                            </div>
-                            <div class="info-item">
-                                <div class="info-label">Score</div>
-                                <div class="info-value">{{ student.risk_score }}</div>
-                            </div>
-                        </div>
-
-                        <div class="details">{{ student.details }}</div>
-                        <div class="action">⚠️ {{ student.recommended_action }}</div>
-                    </div>
-                    {% endfor %}
-
-                    <div class="actions-bar">
-                        <button type="submit" class="btn btn-call" id="callBtn" disabled>
-                            📞 Call <span id="callCount">0</span> Parent(s)
-                        </button>
-                        <a href="/" class="btn btn-back">⬅ Back</a>
-                    </div>
-                </form>
-            {% else %}
-                <div class="no-results">
-                    <div style="font-size: 4em;">✅</div>
-                    <h2>No Students at Risk!</h2>
-                    <p>All students are doing well.</p>
-                    <br>
-                    <a href="/" class="btn">⬅ Back to Dashboard</a>
-                </div>
-            {% endif %}
-        </div>
-    </div>
-
-    <script>
-        function updateCard(checkbox, index) {
-            const card = document.getElementById('card-' + index);
-            if (checkbox.checked) {
-                card.classList.add('selected');
-            } else {
-                card.classList.remove('selected');
-            }
-            updateCount();
-        }
-
-        function toggleAll() {
-            const selectAll = document.getElementById('selectAll');
-            const checkboxes = document.querySelectorAll('.student-checkbox');
-            
-            checkboxes.forEach((cb, i) => {
-                cb.checked = selectAll.checked;
-                updateCard(cb, i);
-            });
-        }
-
-        function updateCount() {
-            const checked = document.querySelectorAll('.student-checkbox:checked');
-            const count = checked.length;
-            
-            document.getElementById('count').textContent = count;
-            document.getElementById('callCount').textContent = count;
-            document.getElementById('callBtn').disabled = (count === 0);
-        }
-    </script>
+<main class="container">
+    <header class="header">
+        <div class="header-icon">{% if dimension == 'attendance' %}<i class="ti ti-chart-bar"></i>{% elif dimension == 'performance' %}<i class="ti ti-pencil"></i>{% elif dimension == 'behavior' %}<i class="ti ti-alert-circle"></i>{% else %}<i class="ti ti-refresh"></i>{% endif %}</div>
+        <h1>{% if dimension == 'attendance' %}Attendance Risk{% elif dimension == 'performance' %}Academic Performance{% elif dimension == 'behavior' %}Behaviour Issues{% else %}Complete Analysis{% endif %}</h1>
+        <div class="summary-badge badge-{{ highest_risk }}"><i class="ti ti-shield-exclamation"></i>{{ at_risk|length }} Student(s) at Risk</div>
+    </header>
+    <section class="content">
+        {% if at_risk %}
+        <div class="selection-bar"><label><input type="checkbox" id="selectAll" onclick="toggleAll()"><strong>Select all students</strong></label><span class="selection-count">Selected: <strong id="count">0</strong></span></div>
+        <form id="callForm" action="/call/selective" method="POST">
+            <input type="hidden" name="dimension" value="{{ dimension }}">
+            {% for student in at_risk %}
+            <article class="student-card {{ student.risk_level|lower }}" id="card-{{ loop.index0 }}">
+                <input type="checkbox" name="selected_students" value="{{ loop.index0 }}" class="student-checkbox" aria-label="Select {{ student.student_name }}" onchange="updateCard(this, {{ loop.index0 }})">
+                <div class="student-heading"><h2 class="student-name">{{ student.student_name }}</h2><span class="risk-badge risk-{{ student.risk_level }}">{{ student.risk_level }}</span></div>
+                <small class="registration">Registration: {{ student.registration }}</small>
+                <div class="student-info"><div class="info-item"><div class="info-label">Parent</div><div class="info-value">{{ student.parent_name }}</div></div><div class="info-item"><div class="info-label">Phone</div><div class="info-value">{{ student.parent_phone }}</div></div><div class="info-item"><div class="info-label">Risk score</div><div class="info-value">{{ student.risk_score }}</div></div></div>
+                <p class="details">{{ student.details }}</p><p class="recommended"><i class="ti ti-alert-triangle"></i><span>{{ student.recommended_action }}</span></p>
+            </article>
+            {% endfor %}
+            <div class="actions-bar"><button type="submit" class="btn btn-call" id="callBtn" disabled><i class="ti ti-phone"></i>Call <span id="callCount">0</span> parent(s)</button><a href="{{ url_for('index') }}" class="btn"><i class="ti ti-arrow-left"></i>Back to dashboard</a></div>
+        </form>
+        {% else %}
+        <div class="no-results"><div class="no-results-icon"><i class="ti ti-shield-check"></i></div><h2>No students at risk</h2><p>All students are doing well.</p><a href="{{ url_for('index') }}" class="btn"><i class="ti ti-arrow-left"></i>Back to dashboard</a></div>
+        {% endif %}
+    </section>
+</main>
+<script>
+function updateCard(checkbox,index){document.getElementById('card-'+index).classList.toggle('selected',checkbox.checked);updateCount()}
+function toggleAll(){const checked=document.getElementById('selectAll').checked;document.querySelectorAll('.student-checkbox').forEach((checkbox,index)=>{checkbox.checked=checked;updateCard(checkbox,index)})}
+function updateCount(){const count=document.querySelectorAll('.student-checkbox:checked').length;document.getElementById('count').textContent=count;document.getElementById('callCount').textContent=count;document.getElementById('callBtn').disabled=count===0;const selectAll=document.getElementById('selectAll');const total=document.querySelectorAll('.student-checkbox').length;selectAll.checked=count===total&&total>0;selectAll.indeterminate=count>0&&count<total}
+</script>
 </body>
 </html>

@@ -1116,6 +1116,8 @@ class TwoWayAIVoiceService:
             repository.fail_summary(call_sid, "No parent speech was captured.")
             return
         call = repository.get_call(call_sid) or {}
+        meeting_start = call.get("meeting_start")
+        meeting_end = call.get("meeting_end")
         transcript = [
             {"speaker": turn["speaker"], "message": turn["message"]}
             for turn in turns
@@ -1131,6 +1133,10 @@ class TwoWayAIVoiceService:
                         "content": (
                             "Summarize a school-parent call as one JSON object using only explicit "
                             "facts. Never invent causes, diagnoses, promises, or meeting details. "
+                            "The brief_summary must concisely state what was discussed, any reason "
+                            "the parent explicitly gave, the agreed next action, and the meeting "
+                            "outcome when meeting metadata is present. If the parent gave no reason, "
+                            "do not infer one. Treat meeting metadata as authoritative. "
                             "Required keys: brief_summary, parent_concerns, school_observations, "
                             "agreed_actions, unresolved_questions, follow_up_required, parent_sentiment."
                         ),
@@ -1142,6 +1148,9 @@ class TwoWayAIVoiceService:
                                 "student_name": call.get("student_name"),
                                 "dimension": call.get("dimension"),
                                 "risk_level": call.get("risk_level"),
+                                "meeting_status": call.get("meeting_status"),
+                                "meeting_start": meeting_start.isoformat() if meeting_start else None,
+                                "meeting_end": meeting_end.isoformat() if meeting_end else None,
                             },
                             "transcript": transcript,
                         }, ensure_ascii=True),

@@ -245,6 +245,45 @@ class SqlCallHistoryRepositoryTests(unittest.TestCase):
         self.assertEqual([turn["turn_number"] for turn in turns], [1, 2, 3])
         self.assertEqual([turn["speaker"] for turn in turns], ["agent", "parent", "agent"])
 
+    def test_delete_calls_removes_selected_call_and_its_transcript_only(self):
+        first_sid = "CA-SQL-DELETE-1"
+        second_sid = "CA-SQL-DELETE-2"
+        self.repository.create_call(first_sid, self.payload, "First opening")
+        self.repository.append_turn(first_sid, "parent", "First answer")
+        self.repository.create_call(second_sid, self.payload, "Second opening")
+
+        deleted = self.repository.delete_calls([first_sid, first_sid, "missing"])
+
+        self.assertEqual(deleted, 1)
+        self.assertIsNone(self.repository.get_call(first_sid))
+        self.assertEqual(self.repository.get_turns(first_sid), [])
+        self.assertIsNotNone(self.repository.get_call(second_sid))
+        self.assertEqual(len(self.repository.get_turns(second_sid)), 1)
+
+    def test_reset_summary_allows_stuck_generation_to_be_retried(self):
+        call_sid = "CA-SQL-RETRY"
+        self.repository.create_call(call_sid, self.payload, "Opening")
+        self.assertTrue(self.repository.claim_summary(call_sid))
+
+        self.assertTrue(self.repository.reset_summary(call_sid))
+        self.assertTrue(self.repository.claim_summary(call_sid))
+
+    def test_completed_summary_can_be_cleared_and_regenerated(self):
+        call_sid = "CA-SQL-REGENERATE"
+        self.repository.create_call(call_sid, self.payload, "Opening")
+        self.assertTrue(self.repository.claim_summary(call_sid))
+        self.repository.save_summary(call_sid, {
+            "brief_summary": "Old summary",
+            "parent_concerns": ["Old concern"],
+        })
+
+        self.assertTrue(self.repository.reset_summary(call_sid))
+        call = self.repository.get_call(call_sid)
+        self.assertEqual(call["summary_status"], "pending")
+        self.assertIsNone(call["brief_summary"])
+        self.assertEqual(call["parent_concerns"], [])
+        self.assertTrue(self.repository.claim_summary(call_sid))
+
 
 if __name__ == "__main__":
     unittest.main()

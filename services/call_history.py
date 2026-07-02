@@ -35,6 +35,8 @@ class NullCallHistoryRepository:
     def list_calls(self, *args, **kwargs): return []
     def get_call(self, *args, **kwargs): return None
     def get_turns(self, *args, **kwargs): return []
+    def delete_calls(self, *args, **kwargs): return 0
+    def reset_summary(self, *args, **kwargs): return False
 
 
 class SqlCallHistoryRepository:
@@ -54,6 +56,14 @@ class SqlCallHistoryRepository:
             database_url = "postgresql+psycopg://" + database_url[len("postgresql://"):]
 
         self.engine = create_engine(database_url, pool_pre_ping=True, future=True)
+        if self.engine.url.get_backend_name() == "sqlite":
+            from sqlalchemy import event
+
+            @event.listens_for(self.engine, "connect")
+            def _enable_sqlite_foreign_keys(dbapi_connection, _connection_record):
+                cursor = dbapi_connection.cursor()
+                cursor.execute("PRAGMA foreign_keys=ON")
+                cursor.close()
         self.metadata = MetaData()
         self.calls = Table(
             "calls", self.metadata,
@@ -219,6 +229,42 @@ class SqlCallHistoryRepository:
                 update(self.calls).where(self.calls.c.call_sid == call_sid)
                 .values(summary_status="failed", summary_error=error[:500])
             )
+
+    def reset_summary(self, call_sid: str) -> bool:
+        """Return an incomplete summary to pending so it can be regenerated."""
+        from sqlalchemy import update
+
+        with self.engine.begin() as connection:
+            result = connection.execute(
+                update(self.calls)
+                .where(self.calls.c.call_sid == call_sid)
+                .where(self.calls.c.summary_status.in_(["pending", "failed", "generating", "completed"]))
+                .values(
+                    summary_status="pending",
+                    brief_summary=None,
+                    parent_concerns=[],
+                    school_observations=[],
+                    agreed_actions=[],
+                    unresolved_questions=[],
+                    follow_up_required=False,
+                    parent_sentiment=None,
+                    summary_error=None,
+                )
+            )
+            return result.rowcount == 1
+
+    def delete_calls(self, call_sids: list[str]) -> int:
+        """Delete selected calls; related transcript turns cascade in the database."""
+        from sqlalchemy import delete
+
+        unique_sids = list(dict.fromkeys(sid for sid in call_sids if sid))
+        if not unique_sids:
+            return 0
+        with self.engine.begin() as connection:
+            result = connection.execute(
+                delete(self.calls).where(self.calls.c.call_sid.in_(unique_sids))
+            )
+            return result.rowcount or 0
 
     def list_calls(self, limit: int = 100) -> list[dict[str, Any]]:
         from sqlalchemy import select

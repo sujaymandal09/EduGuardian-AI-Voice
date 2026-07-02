@@ -324,6 +324,22 @@ def call_history():
     return render_template('call_history.html', calls=calls, history_enabled=repository.enabled)
 
 
+@app.post('/calls/delete')
+def delete_call_history():
+    repository = get_call_history_repository()
+    if not repository.enabled:
+        flash("Call summaries are not enabled.", "warning")
+        return redirect(url_for('call_history'))
+    selected = request.form.getlist('selected_calls')
+    if not selected:
+        flash("Select at least one call to delete.", "warning")
+        return redirect(url_for('call_history'))
+    deleted = repository.delete_calls(selected)
+    noun = "record" if deleted == 1 else "records"
+    flash(f"Deleted {deleted} call {noun}. Calendar meetings were not changed.", "success")
+    return redirect(url_for('call_history'))
+
+
 @app.get('/calls/<call_sid>')
 def call_detail(call_sid):
     repository = get_call_history_repository()
@@ -349,9 +365,13 @@ def retry_call_summary(call_sid):
     repository = get_call_history_repository()
     if not repository.enabled or not repository.get_call(call_sid):
         return "Call not found", 404
+    reset = repository.reset_summary(call_sid)
     voice = get_voice_service()
-    if hasattr(voice, 'finalize_call_summary'):
+    if reset and hasattr(voice, 'finalize_call_summary'):
         summary_executor.submit(voice.finalize_call_summary, call_sid)
+        flash("Summary generation started. Refresh shortly to see it.", "success")
+    else:
+        flash("The summary could not be restarted.", "warning")
     return redirect(url_for('call_detail', call_sid=call_sid))
 
 
